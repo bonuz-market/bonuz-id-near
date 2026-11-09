@@ -6,3 +6,5 @@ target/
 neardev/
 .near-credentials/
 .DS_Store
+node_modules/
+!contracts/registry/res/bonuz_id_registry.wasm
