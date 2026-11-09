@@ -402,6 +402,50 @@
       }
     },
     {
+      "name": "invalid_account_uppercase_named",
+      "why": "NEAR account ids are lowercase; the contract refuses this before check_link",
+      "input": {
+        "accountId": "Alice.testnet",
+        "bonuzId": "mende",
+        "publicKey": "ed25519:AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+        "nonce": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+        "signature": "rNExyFLdaVpn1t3P5XLzWz+StuoO/Xq+1V8Wmgaf66p1ys0xVkVTSKctY1rDYdUMQY9GxD4eiTro1LuTlm8VDg==",
+        "message": "Link NEAR account Alice.testnet to bonuz ID @mende\nNetwork: testnet\nExpires: 1763000480"
+      },
+      "context": {
+        "recipient": "id.bonuz.testnet",
+        "network": "testnet",
+        "now_ns": "1763000000000000000",
+        "allow_registrar_checked": true
+      },
+      "expect": {
+        "ok": false,
+        "error": "this is not a valid NEAR account id"
+      }
+    },
+    {
+      "name": "invalid_account_double_dot",
+      "why": "empty account id part",
+      "input": {
+        "accountId": "a..testnet",
+        "bonuzId": "mende",
+        "publicKey": "ed25519:AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+        "nonce": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+        "signature": "v2X2Ohkq083ehuc2Ev1R+h00nEx41z7XcIQPEMTuDyvKJXad4Qe6r5nBRT5Q55zNYfJWnqI/YKvGPbN8uARBDQ==",
+        "message": "Link NEAR account a..testnet to bonuz ID @mende\nNetwork: testnet\nExpires: 1763000480"
+      },
+      "context": {
+        "recipient": "id.bonuz.testnet",
+        "network": "testnet",
+        "now_ns": "1763000000000000000",
+        "allow_registrar_checked": true
+      },
+      "expect": {
+        "ok": false,
+        "error": "this is not a valid NEAR account id"
+      }
+    },
+    {
       "name": "eth_implicit_account",
       "why": "0x accounts use secp256k1, not ed25519",
       "input": {
