@@ -273,10 +273,18 @@ export interface RegistryLink {
   linked_at: string;
 }
 
+export interface RegistryOpts {
+  contractId: string;
+  rpcUrl: string;
+  /** `final` (default, a second or two behind) or `optimistic`. */
+  finality?: 'final' | 'optimistic';
+  fetchImpl?: typeof fetch;
+}
+
 export const viewRegistry = async <T>(
   method: 'bonuz_of' | 'account_of' | 'link_of' | 'status',
   args: Record<string, string>,
-  opts: { contractId: string; rpcUrl: string; fetchImpl?: typeof fetch },
+  opts: RegistryOpts,
 ): Promise<T> => {
   const res = await (opts.fetchImpl ?? fetch)(opts.rpcUrl, {
     method: 'POST',
@@ -287,7 +295,7 @@ export const viewRegistry = async <T>(
       method: 'query',
       params: {
         request_type: 'call_function',
-        finality: 'final',
+        finality: opts.finality ?? 'final',
         account_id: opts.contractId,
         method_name: method,
         args_base64: base64.encode(utf8.encode(JSON.stringify(args))),
@@ -300,7 +308,6 @@ export const viewRegistry = async <T>(
   return JSON.parse(new TextDecoder().decode(Uint8Array.from(body.result.result))) as T;
 };
 
-type RegistryOpts = { contractId: string; rpcUrl: string; fetchImpl?: typeof fetch };
 export const bonuzOf = (accountId: string, opts: RegistryOpts) =>
   viewRegistry<string | null>('bonuz_of', { account_id: accountId }, opts);
 export const accountOf = (bonuzId: string, opts: RegistryOpts) =>

@@ -1,0 +1,23 @@
+{
+  "name": "bonuz-id-near",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "build:contract": "cd contracts/registry && cargo near build non-reproducible-wasm && mkdir -p res && cp target/near/bonuz_id_registry.wasm res/",
+    "demo": "node scripts/demo.ts",
+    "test": "npm test -w @bonuz/near-link",
+    "test:contract": "cd contracts/registry && cargo test",
+    "deploy:testnet": "node scripts/deploy-testnet.ts"
+  },
+  "devDependencies": {
+    "near-api-js": "^7.4.0",
+    "near-sandbox": "^0.3.5"
+  }
+}
