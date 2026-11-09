@@ -1,0 +1,21 @@
+{
+  "name": "@bonuz/near-link",
+  "version": "1.0.0",
+  "description": "bonuz ID on NEAR: build, sign and check the NEP-413 link message, and read the registry. One implementation for the app, the backend and the tests.",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/near-link.ts",
+  "engines": { "node": ">=22.18" },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "vectors": "node scripts/make-vectors.ts"
+  },
+  "dependencies": {
+    "@noble/hashes": "2.4.0",
+    "@scure/base": "2.4.0",
+    "tweetnacl": "1.0.3"
+  },
+  "devDependencies": {
+    "near-api-js": "7.4.0"
+  }
+}

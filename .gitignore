@@ -6,3 +6,4 @@ target/
 neardev/
 .near-credentials/
 .DS_Store
+node_modules/
