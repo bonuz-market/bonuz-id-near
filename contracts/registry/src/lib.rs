@@ -137,6 +137,25 @@ impl Registry {
         }
     }
 
+    /// Starts this version on an account that ran 1.x (testnet only): removes
+    /// the old storage keys, listed by the deploy script with `view_state`,
+    /// then initialises like `new`. Only the contract account can call it.
+    #[init(ignore_state)]
+    #[private]
+    pub fn migrate_from_v1(
+        old_keys: Vec<Base64VecU8>,
+        owner: AccountId,
+        registrar: AccountId,
+        network: String,
+        allow_registrar_checked: bool,
+        reserve: NearToken,
+    ) -> Self {
+        for key in old_keys {
+            env::storage_remove(&key.0);
+        }
+        Self::new(owner, registrar, network, allow_registrar_checked, reserve)
+    }
+
     /// Registrar only. Links `account_id` to `bonuz_id` with a NEP-413
     /// signature (recipient = this contract, no callback URL) over `message`:
     ///
