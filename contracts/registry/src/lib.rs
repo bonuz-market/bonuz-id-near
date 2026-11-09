@@ -160,32 +160,6 @@ impl Registry {
         }
     }
 
-    /// Starts this version on an account that ran 1.x (testnet only): removes
-    /// the old storage keys, listed by the deploy script with `view_state`,
-    /// then initialises like `new`. Only the contract account can call it.
-    #[init(ignore_state)]
-    #[private]
-    pub fn migrate_from_v1(
-        old_keys: Vec<Base64VecU8>,
-        owner: AccountId,
-        registrar: AccountId,
-        network: String,
-        allow_registrar_checked: bool,
-        reserve: NearToken,
-    ) -> Self {
-        // Never on a live 2.x registry: its state would deserialize as this version.
-        if let Some(raw) = env::storage_read(b"STATE") {
-            require!(
-                near_sdk::borsh::from_slice::<Registry>(&raw).is_err(),
-                "migrate_from_v1 refused: this account already runs version 2"
-            );
-        }
-        for key in old_keys {
-            env::storage_remove(&key.0);
-        }
-        Self::new(owner, registrar, network, allow_registrar_checked, reserve)
-    }
-
     /// Registrar only. Links `account_id` to `bonuz_id` with a NEP-413
     /// signature (recipient = this contract, no callback URL) over `message`:
     ///
@@ -422,7 +396,7 @@ impl Registry {
 
     fn remove(&mut self, account_id: &AccountId, reason: &str) {
         let link = self.links.remove(account_id).unwrap_or_else(|| env::abort()).get().clone();
-        self.link_count -= 1;
+        self.link_count = self.link_count.saturating_sub(1);
         self.account_of.remove(&link.bonuz_id);
         RegistryEvent::Unlink { account_id: account_id.clone(), bonuz_id: link.bonuz_id, reason: reason.into() }
             .emit();

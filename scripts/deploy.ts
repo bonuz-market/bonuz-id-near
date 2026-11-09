@@ -20,7 +20,6 @@
  *
  *   --prepare-keys     make the two account keys and print their public keys; no chain writes
  *   --upgrade-code     live registry: deploy the new wasm, keep the state
- *   --migrate-from-v1  testnet only: an account running 1.x is wiped and restarted
  *   --demo-links       testnet/sandbox only: two demo links
  *   --demo-week-cap    testnet only: set_unlink_daily_cap(1000) until 19 Nov 2026 00:00 UTC
  *   --yes-mainnet      required for any write on mainnet
@@ -47,6 +46,10 @@ interface Profile {
   keyAllowance: bigint; // NEAR: the most a leaked registrar key can burn
   reserve: bigint; // NEAR: link refuses below it
   allowRegistrarChecked: boolean; // named accounts (key checked by bonuz)
+  // The owner's full-access keys, pinned: they become backup full-access keys of both
+  // accounts, so they are never taken from RPC alone. The chain must show exactly these.
+  // Unset only for the local sandbox.
+  ownerKeys?: string[];
   explorer: string;
   record: URL;
 }
@@ -79,6 +82,11 @@ const PROFILES: Record<Network, () => Profile> = {
     keyAllowance: 2n, // the backend alerts under 1 NEAR left, so it must start above that
     reserve: 1n,
     allowRegistrarChecked: false, // implicit (app) accounts only, checked by the contract itself
+    // Read 10 Nov 2026 from rpc.mainnet.fastnear.com and rpc.mainnet.near.org (identical).
+    ownerKeys: [
+      'ed25519:CDYLQ4YE5gJ6UHCyfy578tiWCEg3pEsYKLD9Pwz1GKHj',
+      'ed25519:CcWtkSWQBHFHqmeiz6JmF4auBBC9fv2EFpS1cqixXidd',
+    ],
     explorer: 'https://nearblocks.io/address/id.bonuz.near',
     record: new URL('../deploy/mainnet.json', import.meta.url),
   }),
@@ -106,7 +114,7 @@ const fail = (msg: string): never => {
   process.exit(1);
 };
 if (network === 'mainnet' && !args.has('--yes-mainnet') && !args.has('--prepare-keys')) fail('mainnet writes need --yes-mainnet');
-for (const flag of ['--migrate-from-v1', '--demo-links', '--demo-week-cap']) {
+for (const flag of ['--demo-links', '--demo-week-cap']) {
   if (network === 'mainnet' && args.has(flag)) fail(`${flag} is not allowed on mainnet`);
 }
 
@@ -133,7 +141,12 @@ const saveKey = (accountId: string, key: KeyPair, dir = credDir) => {
   chmodSync(file, 0o600);
   return file;
 };
-const exists = (accountId: string) => provider.viewAccount({ accountId }).then(() => true, () => false);
+// Only a definite "no such account" counts as missing; any other RPC error stops the script.
+const exists = (accountId: string) =>
+  provider.viewAccount({ accountId }).then(
+    () => true,
+    (e) => (/UNKNOWN_ACCOUNT|does not exist/i.test(String(e)) ? false : fail(`could not read ${accountId}: ${String(e).slice(0, 200)}`)),
+  );
 const tx: Record<string, string> = {};
 const log = (step: string, hash?: string) => {
   if (hash) tx[step] = hash;
@@ -152,7 +165,10 @@ const fullKeysOf = async (accountId: string) =>
 if (args.has('--prepare-keys')) {
   console.log(`Create these two accounts from ${P.owner} in your wallet, each with exactly this one key:\n`);
   for (const [id, funding] of [[P.contract, P.contractFunding], [P.registrar, P.registrarFunding]] as const) {
-    if (await exists(id)) fail(`${id} already exists on ${network}; --prepare-keys is only for accounts not created yet`);
+    if (await exists(id)) {
+      console.log(`  ${id} already exists on ${network}; nothing to prepare\n`);
+      continue;
+    }
     if (!existsSync(keyFile(id))) saveKey(id, KeyPair.fromRandom('ed25519'));
     console.log(`  ${id}\n    public key: ${publicKeyIn(id)}\n    send:       ${funding} NEAR\n`);
   }
@@ -163,6 +179,9 @@ if (args.has('--prepare-keys')) {
 // The owner's key is only needed to create accounts (or for --demo-week-cap / the testnet owner demo link).
 const ownerAccount = () => new Account(P.owner, provider, loadKey(P.owner));
 const ownerFullKeys = await fullKeysOf(P.owner);
+if (P.ownerKeys && JSON.stringify([...ownerFullKeys].sort()) !== JSON.stringify([...P.ownerKeys].sort())) {
+  fail(`${P.owner}'s full-access keys on chain (${ownerFullKeys.join(', ')}) differ from the pinned ones in this script; check the wallet and update ownerKeys`);
+}
 const wasm = readFileSync(new URL('../contracts/registry/res/bonuz_id_registry.wasm', import.meta.url));
 const wasmSha = createHash('sha256').update(wasm).digest('hex');
 const wasmCodeHash = base58.encode(createHash('sha256').update(wasm).digest());
@@ -223,9 +242,7 @@ if (registrarExists && !existsSync(keyFile(P.registrar, fcDir))) {
   if (have < near(P.registrarFunding) - near(1n) / 10n) fail(`${P.registrar} holds less than ${P.registrarFunding} NEAR; send the rest first`);
 }
 if (alreadyLive) console.log(`registry ${liveVersion} is live on ${network}: no init, only the flagged steps`);
-if (!alreadyLive && hasCode && !args.has('--migrate-from-v1')) {
-  fail(`${P.contract} runs code without status() (version 1.x). Pass --migrate-from-v1 (testnet only) to wipe it.`);
-}
+if (!alreadyLive && hasCode) fail(`${P.contract} runs code without status(); this script will not touch it`);
 
 // ---- accounts ----
 if (!contractExists) {
@@ -260,6 +277,8 @@ for (const acct of [contract, registrarFull]) {
 // ---- code and init ----
 const addFcKey = async () => {
   const fcKey = KeyPair.fromRandom('ed25519');
+  // Saved first: if the run dies after the add, the next run finds and checks it.
+  console.log(`    function-call key saved to ${saveKey(P.registrar, fcKey, fcDir)}`);
   log(
     'add_registrar_function_call_key',
     (
@@ -271,7 +290,6 @@ const addFcKey = async () => {
       })
     ).transaction.hash,
   );
-  console.log(`    function-call key saved to ${saveKey(P.registrar, fcKey, fcDir)}`);
   return new Account(P.registrar, provider, new KeyPairSigner(fcKey));
 };
 
@@ -284,27 +302,15 @@ const initArgs = {
   reserve: near(P.reserve).toString(),
 };
 if (!alreadyLive) {
-  let oldKeys: string[] = [];
-  if (hasCode) {
-    const state = (await provider.query({ request_type: 'view_state', finality: 'final', account_id: P.contract, prefix_base64: '' })) as unknown as {
-      values: { key: string }[];
-    };
-    oldKeys = state.values.map((v) => v.key);
-  }
   // One transaction: if the init fails, the code deploy is undone too, so a rerun starts clean.
   log(
-    oldKeys.length ? `deploy_and_migrate_from_v1_removing_${oldKeys.length}_old_keys` : 'deploy_and_init',
+    'deploy_and_init',
     (
       await contract.signAndSendTransaction({
         receiverId: P.contract,
         actions: [
           actions.deployContract(new Uint8Array(wasm)),
-          actions.functionCall(
-            oldKeys.length ? 'migrate_from_v1' : 'new',
-            oldKeys.length ? { old_keys: oldKeys, ...initArgs } : initArgs,
-            100_000_000_000_000n,
-            0n,
-          ),
+          actions.functionCall('new', initArgs, 100_000_000_000_000n, 0n),
         ],
       })
     ).transaction.hash,
@@ -314,6 +320,11 @@ if (!alreadyLive) {
     : await addFcKey();
 } else {
   if (args.has('--upgrade-code')) {
+    // Same major.minor = same stored layout. A different one needs a migrate method first.
+    const crate = readFileSync(new URL('../contracts/registry/Cargo.toml', import.meta.url), 'utf8').match(/^version = "(\d+\.\d+)\./m)?.[1];
+    if (!crate || !liveVersion!.startsWith(`${crate}.`)) {
+      fail(`live ${liveVersion} and this wasm (${crate}.x) store state differently; an in-place upgrade would leave the registry unreadable`);
+    }
     log('upgrade_code_keep_state', (await contract.deployContract(new Uint8Array(wasm))).transaction.hash);
   }
   registrar = existsSync(keyFile(P.registrar, fcDir))

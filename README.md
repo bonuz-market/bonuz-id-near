@@ -70,7 +70,7 @@ deposit, reads it back, and shows two refusals. You see, among others:
 
 ```bash
 npm test                 # @bonuz/near-link: 35 tests, incl. 27 shared vectors and a cross-check with near-api-js
-npm run test:contract    # the contract: 37 unit tests, 3 sandbox tests, the same 27 vectors (needs Rust + cargo-near)
+npm run test:contract    # the contract: 36 unit tests, 3 sandbox tests, the same 27 vectors (needs Rust + cargo-near)
 ```
 
 Rust toolchain for the contract: `rustup` with Rust 1.95, `cargo install cargo-near --version 0.23.0`.
@@ -118,7 +118,6 @@ NEP-413 `recipient` is the registry contract id and the `nonce` is the backend's
 | `bonuz_of`, `account_of`, `link_of`, `status` | views | `status` includes the number of linked accounts (`links`). |
 | `set_registrar`, `set_paused`, `set_reserve`, `set_unlink_daily_cap` | owner, 1 yoctoNEAR | |
 | `propose_owner(new_owner)`, then `accept_owner()` | owner, then the proposed account; 1 yoctoNEAR each | Two-step owner change, so a typo cannot lock the owner out. |
-| `migrate_from_v1(old_keys, ...)` | the contract account | Testnet upgrade from the 1.x prototype: deletes its state and starts fresh. Refuses to run on 2.x state. |
 
 Events (NEP-297, standard `bonuz_id_near`, version `2.0.0`): `link` and `unlink`, where `unlink`
 carries a `reason`: `registrar`, `owner` or `replaced`.
@@ -203,7 +202,8 @@ wallet with the keys `--prepare-keys` prints, so the script never holds the `bon
 There are two kinds: the deploy key (saved in `~/.near-credentials` on the deploy machine; back it up
 offline) and the `bonuz.near` wallet's own keys, which
 the deploy script adds as backups. The `owner` in the contract can pause, change the registrar and
-hand ownership over; it cannot change the code.
+hand ownership over; it cannot change the code, so handing ownership over with `accept_owner` does not
+hand over upgrade power: rotate the full-access keys of `id.bonuz.near` too.
 
 ## What was built during the hackathon, and what existed before
 

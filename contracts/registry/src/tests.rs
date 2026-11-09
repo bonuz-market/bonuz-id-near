@@ -565,27 +565,6 @@ fn parser_accepts_only_the_canonical_text() {
     assert!(accepted_changes < 20_000);
 }
 
-#[test]
-fn migrate_from_v1_refuses_a_live_v2_registry() {
-    let mut r = registry("testnet", true);
-    let w = Wallet::new(1);
-    ctx(REGISTRAR, T0);
-    link(&mut r, &signed(&w, "mende", 1, T0 + 480));
-    near_sdk::env::state_write(&r);
-    ctx(CONTRACT, T0);
-    let res = std::panic::catch_unwind(|| {
-        Registry::migrate_from_v1(
-            vec![],
-            OWNER.parse().unwrap(),
-            REGISTRAR.parse().unwrap(),
-            "testnet".into(),
-            true,
-            NearToken::from_near(1),
-        )
-    });
-    assert!(res.is_err(), "migrate must refuse live 2.x state");
-}
-
 // ---------- 2.1: nonce cleanup under traffic, owner change, link count ----------
 
 /// One link every 30 seconds for 6 hours, each message expiring 5 minutes out.
