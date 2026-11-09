@@ -1,25 +1,42 @@
 {
   "network": "testnet",
   "contract_account_id": "id.bonuz.testnet",
+  "contract_version": "1.1.0",
   "owner_id": "bonuz.testnet",
+  "sponsor_id": "sponsor.bonuz.testnet",
   "rpc": "https://rpc.testnet.near.org",
   "explorer": "https://testnet.nearblocks.io/address/id.bonuz.testnet",
-  "code_hash_bs58": "Fc1VDX3put3r674D8JxvHCLJ3kJH5JSm36a24oAqaiJj",
-  "wasm_sha256_hex": "d8fb7ecf534e1e46ccf1308edb8e24b7a11057edab238f763d2bdd4848cf1190",
-  "built_from_commit": "c2442cb",
+  "code_hash_bs58": "3RW6k9WUVw3PMTPnbLh8yfYMNWjJonxLWgFir7fRs9Y3",
+  "wasm_sha256_hex": "23fe3734f69ba09c5f39f751e8ce8c506363887dc822457672c1812fea7dcc38",
+  "built_from_commit": "87dcfc1",
   "build_command": "cargo near build non-reproducible-wasm",
   "toolchain": { "rustc": "1.95.0", "cargo-near": "0.23.0", "near-sdk": "5.30.1" },
   "deployed_at_utc": "2026-11-09",
   "transactions": {
-    "deploy_and_init": "BYfFTMZnusjXjanVXovuQ3jA2BGmo8dZJwcVfLBeYvSH",
-    "demo_link_bonuz_testnet_to_bonuz": "8gWiT5Ai4WsrtnkvPjBBKaNm5Qr4uuLQ2ZFoQPZRJx41"
+    "v1_0_deploy_and_init": "BYfFTMZnusjXjanVXovuQ3jA2BGmo8dZJwcVfLBeYvSH",
+    "v1_0_demo_link_bonuz_testnet_to_bonuz": "8gWiT5Ai4WsrtnkvPjBBKaNm5Qr4uuLQ2ZFoQPZRJx41",
+    "create_sponsor_account": "H9kiBbak2UgeRiyrSvzZiq2Qv6Ts8wjU5dMnqGWeAtxz",
+    "v1_1_deploy_and_migrate": "7ReHkZ3MSimtos9VppTowft9QfR6EkHK3a15ZZfA1JYz",
+    "v1_1_demo_one_click_link_unfunded_app_wallet": "AYwE6dc8wxQjvqoRUdBgz6oq266eZNTEcVZ3ifnBG31a"
+  },
+  "demo_links": {
+    "bonuz.testnet": "bonuz",
+    "1fc703743735f7d47f60bea7d0f916a11fc886bb1404fad8689eb09cc2d29928": "bonuz_demo"
   },
   "link_call": {
     "method": "link",
     "args": { "bonuz_id": "<handle>" },
     "prepaid_gas": "30 Tgas",
-    "attached_deposit_yocto": "3200000000000000000000",
-    "attached_deposit_near": "0.0032",
-    "note": "Excess deposit is refunded in the same call. Must be signed by a full-access key of the account being linked."
+    "attached_deposit_near": "0.006",
+    "note": "Signed by a full-access key of the account being linked. Excess deposit is refunded in the same call."
+  },
+  "link_signed_call": {
+    "method": "link_signed",
+    "signer": "sponsor.bonuz.testnet",
+    "args": { "account_id": "<64-hex implicit account>", "bonuz_id": "<handle>", "nonce": "<base64, 32 bytes>", "signature": "<base64, 64 bytes>" },
+    "message_view": "signed_link_message(account_id, bonuz_id)",
+    "prepaid_gas": "30 Tgas",
+    "attached_deposit_near": "0.006",
+    "note": "NEP-413 signature by the implicit account's key, recipient = id.bonuz.testnet, no callback URL. The user's account does not need to exist on chain."
   }
 }
