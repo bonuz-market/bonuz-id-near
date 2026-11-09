@@ -4,8 +4,10 @@
  *
  *   node scripts/deploy-testnet.ts [--demo-links] [--demo-week-cap]
  *
- *   If id.bonuz.testnet already holds state (version 1.x), the new code starts with
- *   migrate_from_v1, which deletes every old storage key and initialises fresh.
+ *   First run: deploys the code; if id.bonuz.testnet still holds 1.x state, starts with
+ *   migrate_from_v1 (deletes every old key), else with new. Creates the registrar and its
+ *   function-call key. A rerun against a live 2.x registry deploys nothing and only runs
+ *   the flagged steps, so `--demo-week-cap` alone just sets the cap.
  *   --demo-links     link two demo pairs: a fresh unfunded app wallet -> bonuz_demo
  *                    (checked by the contract) and bonuz.testnet -> bonuz (checked by the registrar)
  *   --demo-week-cap  set_unlink_daily_cap(1000, until 19 Nov 2026 00:00 UTC). Only with
@@ -20,7 +22,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { Account, JsonRpcProvider, KeyPair, KeyPairSigner } from 'near-api-js';
-import { linkOf, signLink, buildLinkMessage, signNep413 } from '../packages/near-link/src/near-link.ts';
+import { linkOf, signLink, buildLinkMessage, signNep413, viewRegistry } from '../packages/near-link/src/near-link.ts';
 import { base58, base64 } from '@scure/base';
 
 const RPC = 'https://rpc.testnet.near.org';
@@ -88,40 +90,53 @@ if (!(await exists(REGISTRAR))) {
 }
 const registrarFull = new Account(REGISTRAR, provider, loadKey(REGISTRAR));
 
-// Old state keys (version 1.x), if any. view_state works while the state is small.
-const state = (await provider.query({ request_type: 'view_state', finality: 'final', account_id: CONTRACT, prefix_base64: '' })) as unknown as {
-  values: { key: string }[];
-};
-const oldKeys = state.values.map((v) => v.key);
-const initArgs = { owner: OWNER, registrar: REGISTRAR, network: 'testnet', allow_registrar_checked: true, reserve: near(RESERVE).toString() };
-log('deploy_code', (await contract.deployContract(new Uint8Array(wasm))).transaction.hash);
-log(
-  oldKeys.length ? `migrate_from_v1_removing_${oldKeys.length}_old_keys` : 'init',
-  (
-    await contract.callFunctionRaw({
-      contractId: CONTRACT,
-      methodName: oldKeys.length ? 'migrate_from_v1' : 'new',
-      args: oldKeys.length ? { old_keys: oldKeys, ...initArgs } : initArgs,
-      gas: 100_000_000_000_000n,
-    })
-  ).transaction.hash,
-);
+// A rerun against a live 2.x registry must never deploy, init or migrate again
+// (migrate_from_v1 would delete every link). It only runs the flagged extras.
+const liveVersion = await viewRegistry<{ version: string }>('status', {}, { contractId: CONTRACT, rpcUrl: RPC })
+  .then((s) => s.version)
+  .catch(() => null);
+const alreadyLive = liveVersion?.startsWith('2.') ?? false;
+if (alreadyLive) console.log(`registry ${liveVersion} is live: no deploy, no init, only the flagged steps`);
 
 const fcDir = join(credDir, 'registrar-fc');
-const fcKey = KeyPair.fromRandom('ed25519');
-log(
-  'add_registrar_function_call_key',
-  (
-    await registrarFull.addFunctionCallAccessKey({
-      publicKey: fcKey.getPublicKey(),
-      contractId: CONTRACT,
-      methodNames: ['link', 'unlink_by_registrar'],
-      allowance: near(KEY_ALLOWANCE),
-    })
-  ).transaction.hash,
-);
-console.log(`    function-call key saved to ${saveKey(REGISTRAR, fcKey, fcDir)}`);
-const registrar = new Account(REGISTRAR, provider, new KeyPairSigner(fcKey));
+let registrar: Account;
+if (!alreadyLive) {
+  // Old state keys (version 1.x), if any. view_state works while the state is small.
+  const state = (await provider.query({ request_type: 'view_state', finality: 'final', account_id: CONTRACT, prefix_base64: '' })) as unknown as {
+    values: { key: string }[];
+  };
+  const oldKeys = state.values.map((v) => v.key);
+  const initArgs = { owner: OWNER, registrar: REGISTRAR, network: 'testnet', allow_registrar_checked: true, reserve: near(RESERVE).toString() };
+  log('deploy_code', (await contract.deployContract(new Uint8Array(wasm))).transaction.hash);
+  log(
+    oldKeys.length ? `migrate_from_v1_removing_${oldKeys.length}_old_keys` : 'init',
+    (
+      await contract.callFunctionRaw({
+        contractId: CONTRACT,
+        methodName: oldKeys.length ? 'migrate_from_v1' : 'new',
+        args: oldKeys.length ? { old_keys: oldKeys, ...initArgs } : initArgs,
+        gas: 100_000_000_000_000n,
+      })
+    ).transaction.hash,
+  );
+
+  const fcKey = KeyPair.fromRandom('ed25519');
+  log(
+    'add_registrar_function_call_key',
+    (
+      await registrarFull.addFunctionCallAccessKey({
+        publicKey: fcKey.getPublicKey(),
+        contractId: CONTRACT,
+        methodNames: ['link', 'unlink_by_registrar'],
+        allowance: near(KEY_ALLOWANCE),
+      })
+    ).transaction.hash,
+  );
+  console.log(`    function-call key saved to ${saveKey(REGISTRAR, fcKey, fcDir)}`);
+  registrar = new Account(REGISTRAR, provider, new KeyPairSigner(fcKey));
+} else {
+  registrar = new Account(REGISTRAR, provider, loadKey(REGISTRAR, fcDir));
+}
 
 if (args.has('--demo-week-cap')) {
   log(
@@ -211,5 +226,18 @@ const record = {
   measured: measures,
   history: 'Versions 1.0.0 and 1.1.0 (self-service and sponsor-paid designs) ran on this account on 9 Nov 2026. 2.0.0 started with migrate_from_v1, which deleted all their state; their transactions stay on the explorer. sponsor.bonuz.testnet belonged to 1.1.0 and is no longer used.',
 };
-writeFileSync(new URL('../deploy/testnet.json', import.meta.url), `${JSON.stringify(record, null, 2)}\n`);
+const recordUrl = new URL('../deploy/testnet.json', import.meta.url);
+const out = alreadyLive
+  ? (() => {
+      const prev = JSON.parse(readFileSync(recordUrl, 'utf8'));
+      return {
+        ...prev,
+        unlink_daily_cap: args.has('--demo-week-cap') ? record.unlink_daily_cap : prev.unlink_daily_cap,
+        transactions: { ...prev.transactions, ...tx },
+        demo_links: { ...prev.demo_links, ...demoLinks },
+        measured: { ...prev.measured, ...measures },
+      };
+    })()
+  : record;
+writeFileSync(recordUrl, `${JSON.stringify(out, null, 2)}\n`);
 console.log('wrote deploy/testnet.json');
