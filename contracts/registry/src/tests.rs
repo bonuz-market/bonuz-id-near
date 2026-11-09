@@ -585,3 +585,104 @@ fn migrate_from_v1_refuses_a_live_v2_registry() {
     });
     assert!(res.is_err(), "migrate must refuse live 2.x state");
 }
+
+// ---------- 2.1: nonce cleanup under traffic, owner change, link count ----------
+
+/// One link every 30 seconds for 6 hours, each message expiring 5 minutes out.
+/// Returns how many nonces are stored at the end. At most ~10 can be unexpired.
+fn steady_traffic(random_seeds: bool) -> u32 {
+    let mut r = registry("mainnet", false);
+    for i in 0u32..720 {
+        let now = T0 + u64::from(i) * 30;
+        let mut seed = [0u8; 32];
+        if random_seeds {
+            seed[..4].copy_from_slice(&(i.wrapping_mul(2_654_435_761)).to_le_bytes());
+        }
+        testing_env!(VMContextBuilder::new()
+            .current_account_id(CONTRACT.parse().unwrap())
+            .predecessor_account_id(REGISTRAR.parse().unwrap())
+            .block_timestamp(now * SEC)
+            .random_seed(seed)
+            .account_balance(NearToken::from_near(50))
+            .build());
+        let w = Wallet { key: SigningKey::from_bytes(&{
+            let mut k = [7u8; 32];
+            k[..4].copy_from_slice(&i.to_le_bytes());
+            k
+        }) };
+        let mut nonce = [9u8; 32];
+        nonce[..4].copy_from_slice(&i.to_le_bytes());
+        let handle = format!("user{i}");
+        let message = build_link_message(&w.account(), &handle, "mainnet", now + 300);
+        link(&mut r, &Call {
+            account_id: w.account(),
+            bonuz_id: handle,
+            public_key: w.public_key(),
+            signature: w.sign(&message, nonce, CONTRACT),
+            nonce,
+            message,
+        });
+    }
+    assert_eq!(r.status().links.0, 720);
+    r.status().stored_nonces
+}
+
+// Mocked storage outlives testing_env! within one test, so each run gets its own test.
+#[test]
+fn nonce_cleanup_keeps_up_with_steady_traffic() {
+    let stored = steady_traffic(true);
+    eprintln!("random start: {stored} nonces stored after 720 links");
+    assert!(stored <= 40, "nonces piled up: {stored} stored after 720 links");
+}
+
+/// The 2.0 behaviour (always scanning from the first slot) is what a zero seed
+/// reproduces: the first slots refill with fresh nonces and cleanup stalls.
+#[test]
+fn fixed_start_cleanup_would_stall() {
+    let stalled = steady_traffic(false);
+    eprintln!("fixed start: {stalled} nonces stored after 720 links");
+    assert!(stalled > 300, "expected the fixed-start scan to stall, got {stalled}");
+}
+
+#[test]
+fn owner_change_takes_two_steps() {
+    let mut r = registry("mainnet", false);
+    ctx_yocto("someone.near", T0);
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.propose_owner("x.near".parse().unwrap()))).is_err());
+    ctx_yocto(OWNER, T0);
+    r.propose_owner("new.near".parse().unwrap());
+    assert_eq!(r.status().owner.as_str(), OWNER, "proposing changes nothing yet");
+    ctx_yocto("someone.near", T0);
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.accept_owner())).is_err());
+    ctx("new.near", T0);
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.accept_owner())).is_err(), "needs 1 yocto");
+    ctx_yocto("new.near", T0);
+    r.accept_owner();
+    let s = r.status();
+    assert_eq!(s.owner.as_str(), "new.near");
+    assert!(s.pending_owner.is_none());
+    ctx_yocto(OWNER, T0);
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| r.set_paused(true))).is_err(), "old owner is out");
+}
+
+#[test]
+fn link_count_follows_every_path() {
+    let mut r = registry("testnet", true);
+    let a = Wallet::new(1);
+    let b = Wallet::new(2);
+    ctx(REGISTRAR, T0);
+    link(&mut r, &signed(&a, "one", 1, T0 + 480));
+    link(&mut r, &signed(&b, "two", 2, T0 + 480));
+    assert_eq!(r.status().links.0, 2);
+    link(&mut r, &signed(&a, "three", 3, T0 + 480)); // replace: same account
+    assert_eq!(r.status().links.0, 2);
+    link(&mut r, &signed(&a, "three", 4, T0 + 480)); // same pair again
+    assert_eq!(r.status().links.0, 2);
+    assert!(r.unlink_by_registrar(b.account().parse().unwrap()));
+    assert!(!r.unlink_by_registrar(b.account().parse().unwrap()));
+    assert_eq!(r.status().links.0, 1);
+    ctx_yocto(&a.account(), T0);
+    r.unlink_by_owner();
+    assert_eq!(r.status().links.0, 0);
+    assert_eq!(r.account_of("three".into()), None);
+}

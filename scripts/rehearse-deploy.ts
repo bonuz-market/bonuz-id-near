@@ -39,7 +39,8 @@ try {
   const first = deploy();
   process.stdout.write(first.stdout);
   expect(first.status === 0, 'fresh deploy exits 0');
-  expect(!first.stdout.includes('CHECK FAIL') && (first.stdout.match(/check ok/g)?.length ?? 0) === 10, 'all 10 post-deploy checks pass');
+  expect(!first.stdout.includes('CHECK FAIL') && (first.stdout.match(/check ok/g)?.length ?? 0) === 13, 'all 13 post-deploy checks pass');
+  expect(first.stdout.includes('deploy_and_init') && !/ok  deploy_code\b/.test(first.stdout), 'code and init go out as one transaction');
   const status = await viewRegistry<{ network: string; allow_registrar_checked: boolean }>('status', {}, views);
   expect(status.allow_registrar_checked === false, 'implicit accounts only (mainnet setting)');
 
@@ -86,6 +87,50 @@ try {
   const secrets = execFileSync('find', [creds, '-name', '*.json', '-path', '*sandbox*']).toString().trim().split('\n')
     .map((f) => JSON.parse(readFileSync(f, 'utf8')).private_key as string | undefined).filter(Boolean) as string[];
   expect(secrets.every((k) => !out.includes(k.slice(8, 40))), 'no private key appears in the deploy output');
+
+  // 6. The mainnet path: keys made by the script, accounts created by the owner's
+  //    own wallet, deploy run WITHOUT the owner's key file.
+  const creds2 = mkdtempSync(join(tmpdir(), 'bonuz-deploy-rehearsal-wallet-'));
+  const env2 = { ...env, NEAR_CREDENTIALS_DIR: creds2, SANDBOX_RECORD: join(creds2, 'record.json') };
+  // The profile names id.sandbox / registrar.sandbox, already used above, so start a second sandbox.
+  const sb2 = await Sandbox.start({});
+  try {
+    const env2b = { ...env2, SANDBOX_RPC: sb2.rpcUrl };
+    const run = (...flags: string[]) =>
+      spawnSync('node', ['scripts/deploy.ts', '--network', 'sandbox', ...flags], { env: env2b, encoding: 'utf8' });
+    const p2 = new JsonRpcProvider({ url: sb2.rpcUrl });
+    const prep = run('--prepare-keys');
+    expect(prep.status === 0 && /id\.sandbox\n\s+public key: ed25519:/.test(prep.stdout), '--prepare-keys prints the public keys');
+    const noOwnerKey = run();
+    expect(noOwnerKey.status === 1 && noOwnerKey.stderr.includes('--prepare-keys'), 'without the accounts and the owner key the deploy stops and says why');
+    const pub = (id: string) => JSON.parse(readFileSync(join(creds2, 'sandbox', `${id}.json`), 'utf8')).public_key as string;
+    const wallet = new Account(DEFAULT_ACCOUNT_ID, p2, new KeyPairSigner(KeyPair.fromString(DEFAULT_PRIVATE_KEY)));
+    // A wallet-made account that is short of NEAR is refused before any write.
+    await wallet.createSubAccount({ accountOrPrefix: 'id', publicKey: pub('id.sandbox'), nearToTransfer: 3n * 10n ** 24n });
+    await wallet.createSubAccount({ accountOrPrefix: 'registrar', publicKey: pub('registrar.sandbox'), nearToTransfer: 10n ** 24n });
+    const short = run();
+    expect(short.status === 1 && short.stderr.includes('holds less than'), 'an underfunded registry account is refused');
+    await wallet.transfer({ receiverId: 'id.sandbox', amount: 3n * 10n ** 24n });
+    // A stranger's key on the registry account is refused.
+    const stranger = KeyPair.fromRandom('ed25519');
+    const idAcct = new Account('id.sandbox', p2, new KeyPairSigner(KeyPair.fromString(JSON.parse(readFileSync(join(creds2, 'sandbox', 'id.sandbox.json'), 'utf8')).private_key)));
+    await idAcct.addFullAccessKey(stranger.getPublicKey());
+    const strangerRun = run();
+    if (strangerRun.status !== 1) console.log('--- stranger run', strangerRun.stdout, strangerRun.stderr);
+    expect(strangerRun.status === 1 && strangerRun.stderr.includes('keys bonuz does not hold'), 'an unknown key on the registry account is refused');
+    await idAcct.deleteKey(stranger.getPublicKey());
+    const real = run();
+    if (real.status) console.log('--- real run', real.stdout, real.stderr);
+    process.stdout.write(real.stdout);
+    expect(real.status === 0 && (real.stdout.match(/check ok/g)?.length ?? 0) === 13, 'wallet-created accounts: deploy passes all 13 checks without the owner key');
+    expect(/add_sandbox_key_to_id\.sandbox/.test(real.stdout), "the owner's wallet key is added to the registry account as a backup");
+    const s2 = await viewRegistry<{ owner: string; links: string; version: string }>('status', {}, { contractId: 'id.sandbox', rpcUrl: sb2.rpcUrl, finality: 'optimistic' });
+    expect(s2.owner === 'sandbox' && s2.links === '0' && s2.version === '2.1.0', 'status shows owner, link count and version 2.1.0');
+    const again = run();
+    expect(again.status === 0 && !/ok  (add_|deploy_and)/.test(again.stdout), 'rerun after the wallet path changes nothing');
+  } finally {
+    await sb2.tearDown().catch(() => {});
+  }
 } finally {
   await sandbox.tearDown().catch(() => {});
 }

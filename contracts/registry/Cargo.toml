@@ -1,7 +1,7 @@
 [package]
 name = "bonuz-id-registry"
 description = "bonuz ID registry on NEAR: links NEAR accounts to bonuz ID handles"
-version = "2.0.1"
+version = "2.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/bonuz-market/bonuz-id-near"

@@ -59,12 +59,29 @@ pub struct Link {
     pub linked_at: U64,
 }
 
+/// What `links` stores. A later version adds a variant instead of changing `Link`.
+#[near(serializers = [borsh])]
+#[derive(Clone)]
+pub enum VersionedLink {
+    V1(Link),
+}
+
+impl VersionedLink {
+    fn get(&self) -> &Link {
+        match self {
+            VersionedLink::V1(link) => link,
+        }
+    }
+}
+
 #[near(serializers = [json])]
 pub struct Status {
     pub version: String,
     pub owner: AccountId,
+    pub pending_owner: Option<AccountId>,
     pub registrar: AccountId,
     pub network: String,
+    pub links: U64,
     pub allow_registrar_checked: bool,
     pub paused: bool,
     /// Balance not locked by storage, in yoctoNEAR. `link` refuses below `reserve`.
@@ -81,12 +98,16 @@ pub struct Status {
 #[derive(PanicOnDefault)]
 pub struct Registry {
     owner: AccountId,
+    /// Proposed by the owner, takes over on `accept_owner`.
+    pending_owner: Option<AccountId>,
     registrar: AccountId,
     network: String,
     allow_registrar_checked: bool,
     paused: bool,
     reserve: NearToken,
-    links: LookupMap<AccountId, Link>,
+    links: LookupMap<AccountId, VersionedLink>,
+    /// How many NEAR accounts are linked right now.
+    link_count: u64,
     account_of: LookupMap<String, AccountId>,
     /// Used nonce -> expiry of its message (unix seconds). Kept only until expiry.
     nonces: IterableMap<[u8; 32], u64>,
@@ -123,12 +144,14 @@ impl Registry {
         require!(network == "testnet" || network == "mainnet", "network must be testnet or mainnet");
         Self {
             owner,
+            pending_owner: None,
             registrar,
             network,
             allow_registrar_checked,
             paused: false,
             reserve,
             links: LookupMap::new(StorageKey::Links),
+            link_count: 0,
             account_of: LookupMap::new(StorageKey::AccountOf),
             nonces: IterableMap::new(StorageKey::Nonces),
             raised_cap: None,
@@ -229,7 +252,7 @@ impl Registry {
         }
 
         self.nonces.insert(nonce, expires);
-        if let Some(old) = self.links.get(&account_id).cloned() {
+        if let Some(old) = self.links.get(&account_id).map(|l| l.get().clone()) {
             if old.bonuz_id != bonuz_id {
                 self.account_of.remove(&old.bonuz_id);
                 RegistryEvent::Unlink {
@@ -242,16 +265,16 @@ impl Registry {
         }
 
         let block = env::block_height();
-        self.links.insert(
-            account_id.clone(),
-            Link {
+        let link = VersionedLink::V1(Link {
                 bonuz_id: bonuz_id.clone(),
                 public_key: public_key.clone(),
                 checked_by: checked_by.as_str().into(),
                 linked_at_block: U64(block),
                 linked_at: U64(now),
-            },
-        );
+        });
+        if self.links.insert(account_id.clone(), link).is_none() {
+            self.link_count += 1;
+        }
         self.account_of.insert(bonuz_id.clone(), account_id.clone());
         self.prune(PRUNE_PER_LINK);
         RegistryEvent::Link { account_id, bonuz_id, public_key, checked_by: checked_by.as_str().into() }
@@ -296,6 +319,24 @@ impl Registry {
 
     // ---- owner ----
 
+    /// Step one of an owner change. The new owner must call `accept_owner`;
+    /// until then nothing changes and the owner can propose someone else.
+    #[payable]
+    pub fn propose_owner(&mut self, new_owner: AccountId) {
+        self.assert_owner();
+        self.pending_owner = Some(new_owner);
+    }
+
+    /// Step two: the proposed account takes over. Attach 1 yoctoNEAR.
+    #[payable]
+    pub fn accept_owner(&mut self) {
+        assert_one_yocto();
+        let caller = env::predecessor_account_id();
+        require!(self.pending_owner.as_ref() == Some(&caller), "only the proposed owner can accept");
+        self.owner = caller;
+        self.pending_owner = None;
+    }
+
     #[payable]
     pub fn set_registrar(&mut self, registrar: AccountId) {
         self.assert_owner();
@@ -325,7 +366,7 @@ impl Registry {
     // ---- views ----
 
     pub fn bonuz_of(&self, account_id: AccountId) -> Option<String> {
-        self.links.get(&account_id).map(|l| l.bonuz_id.clone())
+        self.links.get(&account_id).map(|l| l.get().bonuz_id.clone())
     }
 
     pub fn account_of(&self, bonuz_id: String) -> Option<AccountId> {
@@ -333,7 +374,7 @@ impl Registry {
     }
 
     pub fn link_of(&self, account_id: AccountId) -> Option<Link> {
-        self.links.get(&account_id).cloned()
+        self.links.get(&account_id).map(|l| l.get().clone())
     }
 
     pub fn status(&self) -> Status {
@@ -341,8 +382,10 @@ impl Registry {
         Status {
             version: env!("CARGO_PKG_VERSION").into(),
             owner: self.owner.clone(),
+            pending_owner: self.pending_owner.clone(),
             registrar: self.registrar.clone(),
             network: self.network.clone(),
+            links: U64(self.link_count),
             allow_registrar_checked: self.allow_registrar_checked,
             paused: self.paused,
             available_balance: self.available_balance(),
@@ -378,17 +421,29 @@ impl Registry {
     }
 
     fn remove(&mut self, account_id: &AccountId, reason: &str) {
-        let link = self.links.remove(account_id).unwrap_or_else(|| env::abort());
+        let link = self.links.remove(account_id).unwrap_or_else(|| env::abort()).get().clone();
+        self.link_count -= 1;
         self.account_of.remove(&link.bonuz_id);
         RegistryEvent::Unlink { account_id: account_id.clone(), bonuz_id: link.bonuz_id, reason: reason.into() }
             .emit();
     }
 
+    /// Looks at up to `limit` nonces starting at a random position and wrapping
+    /// around. A fixed start would stall: removing an entry moves the newest one
+    /// into its slot, so the first slots fill with nonces that cannot expire yet.
     fn prune(&mut self, limit: u32) -> u32 {
+        let len = self.nonces.len() as usize;
+        if len == 0 || limit == 0 {
+            return 0;
+        }
+        let seed = env::random_seed();
+        let start = u32::from_le_bytes([seed[0], seed[1], seed[2], seed[3]]) as usize % len;
         let now = env::block_timestamp();
         let expired: Vec<[u8; 32]> = self
             .nonces
             .iter()
+            .skip(start)
+            .chain(self.nonces.iter().take(start))
             .take(limit as usize)
             .filter(|(_, &expires)| is_expired(expires, now))
             .map(|(k, _)| *k)

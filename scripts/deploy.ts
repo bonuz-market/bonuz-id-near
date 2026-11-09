@@ -6,11 +6,19 @@
  *   node scripts/deploy.ts --network mainnet --yes-mainnet [--upgrade-code]
  *   node scripts/deploy.ts --network sandbox        (rehearsal; env SANDBOX_RPC, NEAR_CREDENTIALS_DIR)
  *
- * Fresh account: creates it under the owner, deploys, calls `new`, creates the
- * registrar with a FUNCTION-CALL key (link + unlink_by_registrar, capped allowance).
+ * Two ways to get the two accounts (registry + registrar):
+ *   a) the script creates them under the owner (needs the owner's key file), or
+ *   b) `--prepare-keys` makes and saves their keys, prints the public keys, and
+ *      the owner creates the accounts in their own wallet with those keys. The
+ *      script then never needs the owner's key.
+ * Then: deploys the code and calls `new` in ONE transaction (both or neither),
+ * gives the registrar a FUNCTION-CALL key (link + unlink_by_registrar, capped
+ * allowance), and adds the owner's own full-access keys to both accounts as
+ * backups, so the owner's wallet can always upgrade or recover them.
  * A live registry (status() answers) is never re-initialised: only flagged steps run.
  * If the registry cannot be read for any other reason, the script stops before a write.
  *
+ *   --prepare-keys     make the two account keys and print their public keys; no chain writes
  *   --upgrade-code     live registry: deploy the new wasm, keep the state
  *   --migrate-from-v1  testnet only: an account running 1.x is wiped and restarted
  *   --demo-links       testnet/sandbox only: two demo links
@@ -24,7 +32,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'n
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { Account, JsonRpcProvider, KeyPair, KeyPairSigner } from 'near-api-js';
+import { Account, JsonRpcProvider, KeyPair, KeyPairSigner, actions } from 'near-api-js';
 import { linkOf, signLink, buildLinkMessage, signNep413, viewRegistry } from '../packages/near-link/src/near-link.ts';
 import { base58, base64 } from '@scure/base';
 
@@ -61,13 +69,14 @@ const PROFILES: Record<Network, () => Profile> = {
     record: new URL('../deploy/testnet.json', import.meta.url),
   }),
   mainnet: () => ({
-    rpc: 'https://rpc.mainnet.near.org',
+    // rpc.mainnet.near.org is deprecated and heavily rate limited.
+    rpc: process.env.NEAR_RPC ?? 'https://rpc.mainnet.fastnear.com',
     owner: 'bonuz.near',
     contract: 'id.bonuz.near',
     registrar: 'registrar.bonuz.near',
-    contractFunding: 6n, // ~1.9 code + 1 reserve + ~3 for about 900 links once nonces are pruned
-    registrarFunding: 1n,
-    keyAllowance: 1n,
+    contractFunding: 6n, // ~1.9 code + 1 reserve + ~3.1 for about 630-940 links; top up any time by sending NEAR
+    registrarFunding: 1n, // ~0.2 mNEAR gas per call: thousands of calls
+    keyAllowance: 2n, // the backend alerts under 1 NEAR left, so it must start above that
     reserve: 1n,
     allowRegistrarChecked: false, // implicit (app) accounts only, checked by the contract itself
     explorer: 'https://nearblocks.io/address/id.bonuz.near',
@@ -96,7 +105,7 @@ const fail = (msg: string): never => {
   console.error(`STOP: ${msg}`);
   process.exit(1);
 };
-if (network === 'mainnet' && !args.has('--yes-mainnet')) fail('mainnet writes need --yes-mainnet');
+if (network === 'mainnet' && !args.has('--yes-mainnet') && !args.has('--prepare-keys')) fail('mainnet writes need --yes-mainnet');
 for (const flag of ['--migrate-from-v1', '--demo-links', '--demo-week-cap']) {
   if (network === 'mainnet' && args.has(flag)) fail(`${flag} is not allowed on mainnet`);
 }
@@ -131,8 +140,29 @@ const log = (step: string, hash?: string) => {
   console.log(`ok  ${step}${hash ? `  ${hash}` : ''}`);
 };
 const prefix = (sub: string) => sub.slice(0, sub.length - P.owner.length - 1);
+const publicKeyIn = (accountId: string, dir = credDir) =>
+  JSON.parse(readFileSync(keyFile(accountId, dir), 'utf8')).public_key as string;
+type KeyList = { keys: { public_key: string; access_key: { permission: unknown } }[] };
+const keysOf = async (accountId: string) =>
+  ((await provider.query({ request_type: 'view_access_key_list', finality: 'optimistic', account_id: accountId })) as unknown as KeyList).keys;
+const fullKeysOf = async (accountId: string) =>
+  (await keysOf(accountId)).filter((k) => k.access_key.permission === 'FullAccess').map((k) => k.public_key);
 
-const owner = new Account(P.owner, provider, loadKey(P.owner));
+// ---- --prepare-keys: the owner creates the accounts in their own wallet ----
+if (args.has('--prepare-keys')) {
+  console.log(`Create these two accounts from ${P.owner} in your wallet, each with exactly this one key:\n`);
+  for (const [id, funding] of [[P.contract, P.contractFunding], [P.registrar, P.registrarFunding]] as const) {
+    if (await exists(id)) fail(`${id} already exists on ${network}; --prepare-keys is only for accounts not created yet`);
+    if (!existsSync(keyFile(id))) saveKey(id, KeyPair.fromRandom('ed25519'));
+    console.log(`  ${id}\n    public key: ${publicKeyIn(id)}\n    send:       ${funding} NEAR\n`);
+  }
+  console.log(`The private keys stay in ${credDir}. Then run the deploy.`);
+  process.exit(0);
+}
+
+// The owner's key is only needed to create accounts (or for --demo-week-cap / the testnet owner demo link).
+const ownerAccount = () => new Account(P.owner, provider, loadKey(P.owner));
+const ownerFullKeys = await fullKeysOf(P.owner);
 const wasm = readFileSync(new URL('../contracts/registry/res/bonuz_id_registry.wasm', import.meta.url));
 const wasmSha = createHash('sha256').update(wasm).digest('hex');
 const wasmCodeHash = base58.encode(createHash('sha256').update(wasm).digest());
@@ -144,9 +174,29 @@ if (contractExists && !existsSync(keyFile(P.contract))) fail(`${P.contract} exis
 if (registrarExists && !existsSync(keyFile(P.registrar))) fail(`${P.registrar} exists but its key is not in ${credDir}`);
 const needed =
   (contractExists ? 0n : P.contractFunding) + (registrarExists ? 0n : P.registrarFunding) + (contractExists && registrarExists ? 0n : 1n);
-const ownerBalance = BigInt((await provider.viewAccount({ accountId: P.owner })).amount);
-if (ownerBalance < near(needed)) {
-  fail(`${P.owner} holds ${Number(ownerBalance / 10n ** 21n) / 1000} NEAR; this deploy needs about ${needed} NEAR`);
+if (needed > 0n) {
+  if (!existsSync(keyFile(P.owner))) {
+    fail(`${P.contract} or ${P.registrar} does not exist yet and there is no key for ${P.owner}. Run --prepare-keys and create them in the wallet.`);
+  }
+  const ownerBalance = BigInt((await provider.viewAccount({ accountId: P.owner })).amount);
+  if (ownerBalance < near(needed)) {
+    fail(`${P.owner} holds ${Number(ownerBalance / 10n ** 21n) / 1000} NEAR; this deploy needs about ${needed} NEAR`);
+  }
+}
+// Accounts that already exist must hold only keys bonuz controls: ours, the owner's own
+// full-access keys and (registrar) our function-call key. An unknown key on the registry
+// account could call its private methods; one on the registrar could write links.
+const fcDir = join(credDir, 'registrar-fc');
+for (const [id, exists_] of [[P.contract, contractExists], [P.registrar, registrarExists]] as const) {
+  if (!exists_) continue;
+  const ours = publicKeyIn(id);
+  const keys = await keysOf(id);
+  if (!keys.some((k) => k.public_key === ours && k.access_key.permission === 'FullAccess')) {
+    fail(`the key in ${keyFile(id)} is not a full-access key of ${id}`);
+  }
+  const fc = id === P.registrar && existsSync(keyFile(id, fcDir)) ? publicKeyIn(id, fcDir) : null;
+  const unknown = keys.filter((k) => k.public_key !== ours && k.public_key !== fc && !(k.access_key.permission === 'FullAccess' && ownerFullKeys.includes(k.public_key)));
+  if (unknown.length) fail(`${id} has keys bonuz does not hold: ${unknown.map((k) => k.public_key).join(', ')}. Delete them in the wallet first.`);
 }
 
 let liveVersion: string | null = null;
@@ -164,6 +214,14 @@ if (contractExists) {
   }
 }
 const alreadyLive = liveVersion !== null;
+if (!alreadyLive && contractExists) {
+  const have = BigInt((await provider.viewAccount({ accountId: P.contract })).amount);
+  if (have < near(P.contractFunding) - near(1n) / 10n) fail(`${P.contract} holds less than ${P.contractFunding} NEAR; send the rest first`);
+}
+if (registrarExists && !existsSync(keyFile(P.registrar, fcDir))) {
+  const have = BigInt((await provider.viewAccount({ accountId: P.registrar })).amount);
+  if (have < near(P.registrarFunding) - near(1n) / 10n) fail(`${P.registrar} holds less than ${P.registrarFunding} NEAR; send the rest first`);
+}
 if (alreadyLive) console.log(`registry ${liveVersion} is live on ${network}: no init, only the flagged steps`);
 if (!alreadyLive && hasCode && !args.has('--migrate-from-v1')) {
   fail(`${P.contract} runs code without status() (version 1.x). Pass --migrate-from-v1 (testnet only) to wipe it.`);
@@ -175,7 +233,7 @@ if (!contractExists) {
   saveKey(P.contract, key);
   log(
     'create_contract_account',
-    (await owner.createSubAccount({ accountOrPrefix: prefix(P.contract), publicKey: key.getPublicKey(), nearToTransfer: near(P.contractFunding) }))
+    (await ownerAccount().createSubAccount({ accountOrPrefix: prefix(P.contract), publicKey: key.getPublicKey(), nearToTransfer: near(P.contractFunding) }))
       .transaction.hash,
   );
 }
@@ -184,15 +242,22 @@ if (!registrarExists) {
   saveKey(P.registrar, key);
   log(
     'create_registrar_account',
-    (await owner.createSubAccount({ accountOrPrefix: prefix(P.registrar), publicKey: key.getPublicKey(), nearToTransfer: near(P.registrarFunding) }))
+    (await ownerAccount().createSubAccount({ accountOrPrefix: prefix(P.registrar), publicKey: key.getPublicKey(), nearToTransfer: near(P.registrarFunding) }))
       .transaction.hash,
   );
 }
 const contract = new Account(P.contract, provider, loadKey(P.contract));
 const registrarFull = new Account(P.registrar, provider, loadKey(P.registrar));
 
+// ---- backup keys: the owner's own full-access keys can always manage both accounts ----
+for (const acct of [contract, registrarFull]) {
+  const have = await fullKeysOf(acct.accountId);
+  for (const pk of ownerFullKeys.filter((k) => !have.includes(k))) {
+    log(`add_${P.owner}_key_to_${acct.accountId}`, (await acct.addFullAccessKey(pk)).transaction.hash);
+  }
+}
+
 // ---- code and init ----
-const fcDir = join(credDir, 'registrar-fc');
 const addFcKey = async () => {
   const fcKey = KeyPair.fromRandom('ed25519');
   log(
@@ -226,15 +291,21 @@ if (!alreadyLive) {
     };
     oldKeys = state.values.map((v) => v.key);
   }
-  log('deploy_code', (await contract.deployContract(new Uint8Array(wasm))).transaction.hash);
+  // One transaction: if the init fails, the code deploy is undone too, so a rerun starts clean.
   log(
-    oldKeys.length ? `migrate_from_v1_removing_${oldKeys.length}_old_keys` : 'init',
+    oldKeys.length ? `deploy_and_migrate_from_v1_removing_${oldKeys.length}_old_keys` : 'deploy_and_init',
     (
-      await contract.callFunctionRaw({
-        contractId: P.contract,
-        methodName: oldKeys.length ? 'migrate_from_v1' : 'new',
-        args: oldKeys.length ? { old_keys: oldKeys, ...initArgs } : initArgs,
-        gas: 100_000_000_000_000n,
+      await contract.signAndSendTransaction({
+        receiverId: P.contract,
+        actions: [
+          actions.deployContract(new Uint8Array(wasm)),
+          actions.functionCall(
+            oldKeys.length ? 'migrate_from_v1' : 'new',
+            oldKeys.length ? { old_keys: oldKeys, ...initArgs } : initArgs,
+            100_000_000_000_000n,
+            0n,
+          ),
+        ],
       })
     ).transaction.hash,
   );
@@ -254,7 +325,7 @@ if (args.has('--demo-week-cap')) {
   log(
     'set_unlink_daily_cap_1000_until_2026_11_19',
     (
-      await owner.callFunctionRaw({
+      await ownerAccount().callFunctionRaw({
         contractId: P.contract,
         methodName: 'set_unlink_daily_cap',
         args: { cap: DEMO_WEEK_CAP.cap, until: String(DEMO_WEEK_CAP.until) },
@@ -331,6 +402,8 @@ const fcView = (await provider.query({
   public_key: fcPublic,
 })) as unknown as { permission: { FunctionCall?: { receiver_id: string; method_names: string[]; allowance: string | null } } | string };
 const fc = typeof fcView.permission === 'object' ? fcView.permission.FunctionCall : undefined;
+const contractKeys = await keysOf(P.contract);
+const registrarFullKeys = await fullKeysOf(P.registrar);
 const checks: [string, boolean][] = [
   ['code on chain = this wasm', chainCode === wasmCodeHash || !(args.has('--upgrade-code') || !alreadyLive)],
   ['network', status.network === initArgs.network],
@@ -342,6 +415,9 @@ const checks: [string, boolean][] = [
   ['registrar key only reaches the registry', fc?.receiver_id === P.contract],
   ['registrar key methods', JSON.stringify([...(fc?.method_names ?? [])].sort()) === JSON.stringify(['link', 'unlink_by_registrar'])],
   ['registrar key has a capped allowance', !!fc?.allowance],
+  [`${P.owner} keys can also manage ${P.contract}`, ownerFullKeys.length > 0 && ownerFullKeys.every((k) => contractKeys.some((c) => c.public_key === k))],
+  [`${P.owner} keys can also manage ${P.registrar}`, ownerFullKeys.length > 0 && ownerFullKeys.every((k) => registrarFullKeys.includes(k))],
+  [`${P.contract} holds only full-access keys bonuz controls`, contractKeys.every((k) => k.access_key.permission === 'FullAccess' && (k.public_key === publicKeyIn(P.contract) || ownerFullKeys.includes(k.public_key)))],
 ];
 for (const [name, ok] of checks) console.log(`${ok ? 'check ok ' : 'CHECK FAIL'}  ${name}`);
 if (checks.some(([, ok]) => !ok)) process.exitCode = 1;
@@ -353,6 +429,7 @@ const record = {
   contract_version: status.version,
   owner: P.owner,
   registrar: P.registrar,
+  backup_keys: `${P.owner}'s full-access keys are also full-access keys of ${P.contract} and ${P.registrar}`,
   registrar_key: { kind: 'function-call', methods: ['link', 'unlink_by_registrar'], allowance_near: String(P.keyAllowance) },
   reserve_near: String(P.reserve),
   allow_registrar_checked: status.allow_registrar_checked,
