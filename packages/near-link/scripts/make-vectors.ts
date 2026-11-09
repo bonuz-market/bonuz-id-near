@@ -194,6 +194,18 @@ const cases: Case[] = [
     expect: err('implicit accounts must be lowercase hex'),
   }),
   make({
+    name: 'invalid_account_uppercase_named',
+    why: 'NEAR account ids are lowercase; the contract refuses this before check_link',
+    account: 'Alice.testnet',
+    expect: err('this is not a valid NEAR account id'),
+  }),
+  make({
+    name: 'invalid_account_double_dot',
+    why: 'empty account id part',
+    account: 'a..testnet',
+    expect: err('this is not a valid NEAR account id'),
+  }),
+  make({
     name: 'eth_implicit_account',
     why: '0x accounts use secp256k1, not ed25519',
     account: '0x1234567890abcdef1234567890abcdef12345678',

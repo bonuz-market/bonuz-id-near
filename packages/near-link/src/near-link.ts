@@ -93,6 +93,12 @@ export const handleError = (bonuzId: string): string | null => {
 export const isExpired = (expires: number | bigint, nowNs: bigint): boolean =>
   nowNs >= BigInt(expires) * 1_000_000_000n;
 
+/** NEAR's account id rule: 2 to 64 chars, lowercase, parts of a-z 0-9 split by single - or _, joined by dots. */
+export const isValidAccountId = (accountId: string): boolean =>
+  accountId.length >= 2 &&
+  accountId.length <= 64 &&
+  /^(([a-z\d]+[-_])*[a-z\d]+\.)*([a-z\d]+[-_])*[a-z\d]+$/.test(accountId);
+
 export const isImplicitAccountId = (accountId: string): boolean => /^[0-9a-f]{64}$/.test(accountId);
 
 /** The implicit account of an ed25519 public key: its 32 bytes in lowercase hex. */
@@ -205,6 +211,10 @@ export const checkLink = (input: LinkInput, ctx: LinkContext): LinkCheck => {
     if (input.accountId.startsWith('0x')) {
       return { ok: false, error: 'Ethereum-style NEAR accounts (0x...) cannot be linked yet' };
     }
+    if (/^[0-9a-fA-F]{64}$/.test(input.accountId) && /[A-F]/.test(input.accountId)) {
+      return { ok: false, error: 'implicit accounts must be lowercase hex' };
+    }
+    if (!isValidAccountId(input.accountId)) return { ok: false, error: 'this is not a valid NEAR account id' };
     const nonce = decodeB64(input.nonce, 'nonce');
     if (nonce.length !== 32) return { ok: false, error: 'nonce must be 32 bytes' };
     const signature = decodeB64(input.signature, 'signature');
@@ -232,9 +242,6 @@ export const checkLink = (input: LinkInput, ctx: LinkContext): LinkCheck => {
         return { ok: false, error: 'the key does not belong to this implicit account' };
       }
       return { ok: true, checkedBy: 'contract', expires: msg.expires };
-    }
-    if (input.accountId.length === 64 && /^[0-9a-fA-F]{64}$/.test(input.accountId)) {
-      return { ok: false, error: 'implicit accounts must be lowercase hex' };
     }
     if (!ctx.allowRegistrarChecked) return { ok: false, error: 'this registry only links implicit accounts' };
     return { ok: true, checkedBy: 'registrar', expires: msg.expires };

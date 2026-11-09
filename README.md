@@ -35,7 +35,7 @@ near contract call-function as-read-only id.bonuz.testnet link_of json-args '{"a
 ```
 
 You see `"bonuz_id": "bonuz"` and `"checked_by": "registrar"` (a named account; see "What the
-contract proves" below). `status` shows the version (`2.0.0`), the registrar, the balance left and
+contract proves" below). `status` shows the version (`2.0.1`), the registrar, the balance left and
 the daily unlink cap.
 
 ### 2. Run the whole flow on a local NEAR node (one command)
@@ -69,8 +69,8 @@ deposit, reads it back, and shows two refusals. You see, among others:
 ### 3. Run the tests
 
 ```bash
-npm test                 # @bonuz/near-link: 33 tests, incl. 25 shared vectors and a cross-check with near-api-js
-npm run test:contract    # the contract: 32 unit tests, 3 sandbox tests, the same 25 vectors (needs Rust + cargo-near)
+npm test                 # @bonuz/near-link: 35 tests, incl. 27 shared vectors and a cross-check with near-api-js
+npm run test:contract    # the contract: 33 unit tests, 3 sandbox tests, the same 27 vectors (needs Rust + cargo-near)
 ```
 
 Rust toolchain for the contract: `rustup` with Rust 1.95, `cargo install cargo-near --version 0.23.0`.
@@ -113,11 +113,11 @@ NEP-413 `recipient` is the registry contract id and the `nonce` is the backend's
 |---|---|---|
 | `link(account_id, bonuz_id, public_key, nonce, signature, message)` | registrar only | Verifies the NEP-413 signature (recipient = this contract), parses the message exactly, checks it names this account, this handle and this network, that `now < Expires <= now + 10 min`, and that the nonce was never used. For an implicit account it checks `hex(public_key) == account_id`. One account to one handle: a new signed link from the same account replaces its old handle; a handle held by another account is refused until it is unlinked. Returns the block height. |
 | `unlink_by_registrar(account_id)` | registrar only | Removal only, at most 100 per day (an owner-raised cap falls back to 100 at a set time on its own). |
-| `unlink_by_owner()` | the linked account | Removes its own link (1 yoctoNEAR, full-access key). Works while paused. |
+| `unlink_by_owner()` | the linked account | Removes its own link (1 yoctoNEAR, full-access key). Works while paused. The account needs a little NEAR for gas; an unfunded app wallet removes its link from the bonuz app instead, which uses `unlink_by_registrar`. |
 | `prune_nonces(limit)` | anyone | Deletes up to 50 used nonces whose messages have expired. Never transfers anything. |
 | `bonuz_of`, `account_of`, `link_of`, `status` | views | |
 | `set_registrar`, `set_paused`, `set_reserve`, `set_unlink_daily_cap` | owner, 1 yoctoNEAR | |
-| `migrate_from_v1(old_keys, ...)` | the contract account | One-time testnet upgrade from the 1.x prototype: deletes its state and starts fresh. |
+| `migrate_from_v1(old_keys, ...)` | the contract account | Testnet upgrade from the 1.x prototype: deletes its state and starts fresh. Refuses to run on 2.x state. |
 
 Events (NEP-297, standard `bonuz_id_near`, version `2.0.0`): `link` and `unlink`, where `unlink`
 carries a `reason`: `registrar`, `owner` or `replaced`.
@@ -126,8 +126,11 @@ carries a `reason`: `registrar`, `owner` or `replaced`.
 so it can never pay storage. The contract pays storage from its own pre-funded balance instead and
 refuses to link when that balance falls under a reserve. The key is limited to this contract and to
 `link` and `unlink_by_registrar`, with a capped gas allowance: a leaked key cannot move bonuz's NEAR,
-cannot add or move a link (each one needs a fresh user signature), and can remove at most the day's
-unlink cap, every removal visible on chain.
+cannot add or move a link for an implicit account (each one needs a fresh signature by that
+account's own key), and can remove at most the day's unlink cap, every removal visible on chain.
+On a registry that accepts named accounts (testnet does), the contract cannot tie a named account
+to its key, so a leaked registrar key could link a named account it does not hold; that is why a
+mainnet registry starts with implicit accounts only.
 
 Measured on testnet: `link` burns about 2.7 Tgas (about 0.0003 NEAR) and stores about 490 bytes for
 an implicit account (0.0049 NEAR, including the nonce record that `prune_nonces` frees after it
@@ -141,7 +144,7 @@ One implementation of the link message, used by the bonuz app (to build and sign
 order, with the same refusal texts) and a small read-only registry client. It depends only on
 `@noble/hashes`, `@scure/base` and `tweetnacl`.
 
-[`vectors.json`](packages/near-link/vectors.json) holds 25 cases with hand-written expectations:
+[`vectors.json`](packages/near-link/vectors.json) holds 27 cases with hand-written expectations:
 valid links, and a valid signature over the wrong recipient, the wrong network, an expired message,
 a different handle, a handle that is a prefix of the real one (`@men` vs `@mende`), the wrong case,
 uppercase implicit hex, an `0x` account, an extra line, `\r\n` line endings and more. The TypeScript
@@ -151,8 +154,9 @@ byte.
 
 ## What the contract proves, and what it does not
 
-- bonuz **cannot attach** a NEAR account to a handle without that account's key signing a message
-  that names both the account and that exact handle. The contract checks both, whole strings only.
+- For an implicit account, bonuz **cannot attach** it to a handle without that account's key signing
+  a message that names both the account and that exact handle. The contract checks both, whole
+  strings only. (Named accounts are different; see below.)
 - For an **implicit account** (the 64-hex accounts the bonuz app creates) the key-to-account check is
   done by the contract itself. It proves the key is the account's **original** key, not that it still
   controls the account: once funded, an implicit account's owner can add or delete keys. In short,
@@ -175,8 +179,8 @@ byte.
 
 | | |
 |---|---|
-| Contract | `id.bonuz.testnet`, version 2.0.0 |
-| Accepts | implicit accounts (checked by the contract) and named accounts (checked by bonuz) |
+| Contract | `id.bonuz.testnet`, version 2.0.1 |
+| Accepts | implicit accounts (checked by the contract) and named accounts (checked by bonuz, trusted to the registrar) |
 | Owner (pause, registrar, caps; cannot link) | `bonuz.testnet` |
 | Registrar (function-call key only) | `registrar.bonuz.testnet` |
 | Explorer | https://testnet.nearblocks.io/address/id.bonuz.testnet |

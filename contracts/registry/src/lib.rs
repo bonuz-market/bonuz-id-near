@@ -150,6 +150,13 @@ impl Registry {
         allow_registrar_checked: bool,
         reserve: NearToken,
     ) -> Self {
+        // Never on a live 2.x registry: its state would deserialize as this version.
+        if let Some(raw) = env::storage_read(b"STATE") {
+            require!(
+                near_sdk::borsh::from_slice::<Registry>(&raw).is_err(),
+                "migrate_from_v1 refused: this account already runs version 2"
+            );
+        }
         for key in old_keys {
             env::storage_remove(&key.0);
         }

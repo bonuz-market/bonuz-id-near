@@ -243,7 +243,7 @@ async fn link_refused_when_the_contract_balance_is_under_its_reserve() -> anyhow
         .await?;
     assert!(format!("{:?}", res.into_result().unwrap_err()).contains("under its reserve"));
     let status: Value = env.contract.view("status").await?.json()?;
-    assert_eq!(status["version"], "2.0.0");
+    assert_eq!(status["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(status["unlink_daily_cap"], 100);
     Ok(())
 }

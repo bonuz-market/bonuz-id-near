@@ -4,10 +4,12 @@
  *
  *   node scripts/deploy-testnet.ts [--demo-links] [--demo-week-cap]
  *
- *   First run: deploys the code; if id.bonuz.testnet still holds 1.x state, starts with
- *   migrate_from_v1 (deletes every old key), else with new. Creates the registrar and its
- *   function-call key. A rerun against a live 2.x registry deploys nothing and only runs
- *   the flagged steps, so `--demo-week-cap` alone just sets the cap.
+ *   Fresh account (no code): deploys and calls new. An account running 1.x (code but no
+ *   status() method): only with --migrate-from-v1, which deletes every old key. A live
+ *   registry (status() answers): never redeployed or re-initialised; only the flagged steps
+ *   run. If the registry cannot be read for any other reason, the script stops.
+ *   --upgrade-code   live registry only: deploy the new wasm, keep the state (same layout)
+ *   --migrate-from-v1  see above; the contract itself also refuses this on 2.x state
  *   --demo-links     link two demo pairs: a fresh unfunded app wallet -> bonuz_demo
  *                    (checked by the contract) and bonuz.testnet -> bonuz (checked by the registrar)
  *   --demo-week-cap  set_unlink_daily_cap(1000, until 19 Nov 2026 00:00 UTC). Only with
@@ -69,7 +71,7 @@ let contract = new Account(CONTRACT, provider, contractKey);
 
 const wasm = readFileSync(new URL('../contracts/registry/res/bonuz_id_registry.wasm', import.meta.url));
 const wasmSha = createHash('sha256').update(wasm).digest('hex');
-const codeHash = base58.encode(createHash('sha256').update(wasm).digest());
+const wasmCodeHash = base58.encode(createHash('sha256').update(wasm).digest());
 
 if (!(await exists(CONTRACT))) {
   const pub = KeyPair.fromString(contractKey).getPublicKey();
@@ -90,13 +92,28 @@ if (!(await exists(REGISTRAR))) {
 }
 const registrarFull = new Account(REGISTRAR, provider, loadKey(REGISTRAR));
 
-// A rerun against a live 2.x registry must never deploy, init or migrate again
-// (migrate_from_v1 would delete every link). It only runs the flagged extras.
-const liveVersion = await viewRegistry<{ version: string }>('status', {}, { contractId: CONTRACT, rpcUrl: RPC })
-  .then((s) => s.version)
-  .catch(() => null);
-const alreadyLive = liveVersion?.startsWith('2.') ?? false;
-if (alreadyLive) console.log(`registry ${liveVersion} is live: no deploy, no init, only the flagged steps`);
+// What runs on the contract account now. Any doubt stops the script before a write.
+const codeHash = (await provider.viewAccount({ accountId: CONTRACT })).code_hash;
+const hasCode = codeHash !== '11111111111111111111111111111111';
+let liveVersion: string | null = null;
+if (hasCode) {
+  try {
+    liveVersion = (await viewRegistry<{ version: string }>('status', {}, { contractId: CONTRACT, rpcUrl: RPC })).version;
+  } catch (e) {
+    const text = String(e);
+    if (!/MethodNotFound|MethodResolveError/.test(text)) {
+      console.error('Could not read status() from the registry, so nothing is changed. Try again.');
+      console.error(text.slice(0, 300));
+      process.exit(1);
+    }
+  }
+}
+const alreadyLive = liveVersion !== null;
+if (alreadyLive) console.log(`registry ${liveVersion} is live: no init, only the flagged steps`);
+if (!alreadyLive && hasCode && !args.has('--migrate-from-v1')) {
+  console.error('The account runs code without status() (version 1.x). Pass --migrate-from-v1 to wipe its state.');
+  process.exit(1);
+}
 
 const fcDir = join(credDir, 'registrar-fc');
 let registrar: Account;
@@ -135,7 +152,28 @@ if (!alreadyLive) {
   console.log(`    function-call key saved to ${saveKey(REGISTRAR, fcKey, fcDir)}`);
   registrar = new Account(REGISTRAR, provider, new KeyPairSigner(fcKey));
 } else {
-  registrar = new Account(REGISTRAR, provider, loadKey(REGISTRAR, fcDir));
+  if (args.has('--upgrade-code')) {
+    log('upgrade_code_keep_state', (await contract.deployContract(new Uint8Array(wasm))).transaction.hash);
+  }
+  if (existsSync(join(fcDir, `${REGISTRAR}.json`))) {
+    registrar = new Account(REGISTRAR, provider, loadKey(REGISTRAR, fcDir));
+  } else {
+    // An earlier run stopped before saving the function-call key: add a fresh one.
+    const fcKey = KeyPair.fromRandom('ed25519');
+    log(
+      'add_registrar_function_call_key',
+      (
+        await registrarFull.addFunctionCallAccessKey({
+          publicKey: fcKey.getPublicKey(),
+          contractId: CONTRACT,
+          methodNames: ['link', 'unlink_by_registrar'],
+          allowance: near(KEY_ALLOWANCE),
+        })
+      ).transaction.hash,
+    );
+    console.log(`    function-call key saved to ${saveKey(REGISTRAR, fcKey, fcDir)}`);
+    registrar = new Account(REGISTRAR, provider, new KeyPairSigner(fcKey));
+  }
 }
 
 if (args.has('--demo-week-cap')) {
@@ -202,19 +240,24 @@ if (args.has('--demo-links')) {
   console.log(`    link_of(${OWNER}) = ${JSON.stringify(check)}`);
 }
 
+const finalStatus = await viewRegistry<{ version: string; allow_registrar_checked: boolean }>('status', {}, {
+  contractId: CONTRACT,
+  rpcUrl: RPC,
+  finality: 'optimistic',
+});
 const commit = execFileSync('git', ['rev-parse', '--short', 'HEAD']).toString().trim();
 const record = {
   network: 'testnet',
   contract_account_id: CONTRACT,
-  contract_version: '2.0.0',
+  contract_version: finalStatus.version,
   owner: OWNER,
   registrar: REGISTRAR,
   registrar_key: { kind: 'function-call', methods: ['link', 'unlink_by_registrar'], allowance_near: String(KEY_ALLOWANCE) },
   reserve_near: String(RESERVE),
-  allow_registrar_checked: true,
+  allow_registrar_checked: finalStatus.allow_registrar_checked,
   rpc: RPC,
   explorer: `https://testnet.nearblocks.io/address/${CONTRACT}`,
-  code_hash_bs58: codeHash,
+  code_hash_bs58: wasmCodeHash,
   wasm_sha256_hex: wasmSha,
   built_from_commit: commit,
   build_command: 'cargo near build non-reproducible-wasm',
@@ -233,6 +276,14 @@ const out = alreadyLive
       return {
         ...prev,
         unlink_daily_cap: args.has('--demo-week-cap') ? record.unlink_daily_cap : prev.unlink_daily_cap,
+        ...(args.has('--upgrade-code')
+          ? {
+              contract_version: record.contract_version,
+              code_hash_bs58: record.code_hash_bs58,
+              wasm_sha256_hex: record.wasm_sha256_hex,
+              built_from_commit: record.built_from_commit,
+            }
+          : {}),
         transactions: { ...prev.transactions, ...tx },
         demo_links: { ...prev.demo_links, ...demoLinks },
         measured: { ...prev.measured, ...measures },

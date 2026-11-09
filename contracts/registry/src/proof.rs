@@ -182,6 +182,12 @@ pub fn check_link(
     if input.account_id.starts_with("0x") {
         return Err("Ethereum-style NEAR accounts (0x...) cannot be linked yet");
     }
+    if looks_like_uppercase_implicit(input.account_id) {
+        return Err("implicit accounts must be lowercase hex");
+    }
+    if input.account_id.parse::<near_sdk::AccountId>().is_err() {
+        return Err("this is not a valid NEAR account id");
+    }
     let nonce: &[u8; 32] = input.nonce.try_into().map_err(|_| "nonce must be 32 bytes")?;
     let signature: &[u8; 64] = input.signature.try_into().map_err(|_| "signature must be 64 bytes")?;
     let public_key = parse_public_key(input.public_key)?;
@@ -212,17 +218,17 @@ pub fn check_link(
     let checked_by = match implicit_public_key(input.account_id) {
         Some(key) if key == public_key => CheckedBy::Contract,
         Some(_) => return Err("the key does not belong to this implicit account"),
-        None if looks_like_uppercase_implicit(input.account_id) => {
-            return Err("implicit accounts must be lowercase hex")
-        }
         None if ctx.allow_registrar_checked => CheckedBy::Registrar,
         None => return Err("this registry only links implicit accounts"),
     };
     Ok((checked_by, msg.expires))
 }
 
+/// 64 hex characters with at least one uppercase letter.
 fn looks_like_uppercase_implicit(account_id: &str) -> bool {
-    account_id.len() == 64 && account_id.bytes().all(|b| b.is_ascii_hexdigit())
+    account_id.len() == 64
+        && account_id.bytes().all(|b| b.is_ascii_hexdigit())
+        && account_id.bytes().any(|b| b.is_ascii_uppercase())
 }
 
 #[cfg(test)]
