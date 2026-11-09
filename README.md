@@ -1,256 +1,217 @@
 # bonuz ID on NEAR
 
-A NEAR smart contract that links a NEAR account to a bonuz ID. A bonuz ID is the public profile a
-bonuz user has at `bonuz.id/<handle>`. Anyone, including AI agents, can then ask the registry
-"which bonuz ID is this NEAR account?" or "which NEAR account is `alice`?". The same pair is stored
-the other way round on the bonuz ID contract on Base (its `w_near` slot), so the two registries
-point at each other without a bridge.
+bonuz is a live consumer app (iOS and Android) where people collect rewards for showing up at real
+places and events. Every bonuz user has a **bonuz ID**, a public profile at `bonuz.id/<handle>`
+that lists their verified socials and wallets.
 
-There are two ways to link:
-
-- **One click from the bonuz app.** The NEAR wallet the bonuz app creates is a NEAR implicit
-  account: its account id is the hex of its public key. The app signs one message with that key
-  (NEP-413), bonuz submits it and pays the storage. The user needs no NEAR, pays no gas, and the
-  account does not even have to exist on chain yet.
-- **Any NEAR account, by itself.** An account like `alice.near` calls `link("alice")` and pays its
-  own small storage deposit. The protocol tells the contract which account signed, so no extra
-  signature is needed.
+This repo adds **NEAR to the bonuz ID**. A bonuz user taps "Show on my bonuz ID" in the app's NEAR
+wallet. The wallet signs one free message (NEP-413: no transaction, no gas, the account does not
+even have to exist on chain). bonuz checks it, marks the NEAR account verified on the bonuz ID, and
+records the pair in a public **registry contract on NEAR**, which re-checks the signature itself.
+After that, anyone, including AI agents, can ask NEAR "which bonuz ID is this account?" and get a
+handle backed by a real person's profile.
 
 Built for the NEAR HACKATHON (November 2026). All code in this repo was written with Claude
-(Anthropic's AI) and reviewed by the bonuz team.
+(Anthropic's AI), directed by the bonuz team.
 
-## Live on testnet
+## Try it
+
+You need Node.js 22.18 or newer. Nothing else: the contract wasm is committed.
+
+### 1. Read the live testnet registry (no install)
+
+```bash
+curl -s https://rpc.testnet.near.org -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"query","params":{"request_type":"call_function","finality":"final","account_id":"id.bonuz.testnet","method_name":"account_of","args_base64":"eyJib251el9pZCI6ImJvbnV6X2RlbW8ifQ=="}}' | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(Buffer.from(JSON.parse(s).result.result).toString()))'
+```
+
+You see `"e8f85fc15d2b62fe970b472872829490763922313f4762f8bceb2e083c7f08e2"`: an app-style NEAR
+wallet linked to the handle `bonuz_demo`. That account has never been funded and does not exist on
+chain. It never needed NEAR to be linked. (`args_base64` is `{"bonuz_id":"bonuz_demo"}`.)
+
+With [near-cli-rs](https://github.com/near/near-cli-rs) installed, the same in one line:
+
+```bash
+near contract call-function as-read-only id.bonuz.testnet link_of json-args '{"account_id":"bonuz.testnet"}' network-config testnet now
+```
+
+You see `"bonuz_id": "bonuz"` and `"checked_by": "registrar"` (a named account; see "What the
+contract proves" below). `status` shows the version (`2.0.0`), the registrar, the balance left and
+the daily unlink cap.
+
+### 2. Run the whole flow on a local NEAR node (one command)
+
+```bash
+npm ci
+npm run demo
+```
+
+It starts a local NEAR sandbox (the first run downloads the node), deploys the registry, gives the
+registrar a **function-call key** (registry only, two methods, 2 NEAR gas allowance), makes a
+brand-new NEAR key the way the bonuz app does, signs the link message with it, links it with zero
+deposit, reads it back, and shows two refusals. You see, among others:
+
+```
+[3] Make a brand-new app wallet (NEAR implicit account, never funded)
+    ok  exists on chain: false
+[4] The wallet signs the link message (NEP-413: no transaction, no gas)
+        | Link NEAR account <64 hex> to bonuz ID @demo_user
+        | Network: testnet
+        | Expires: <unix seconds>
+[5] The registrar submits link() with 0 deposit; the contract re-checks the signature
+    ok  gas burnt 2.64 Tgas; the contract paid 490 bytes of storage
+[6] Read it back, like any app or agent can
+    ok  bonuz_of(...) = "demo_user"
+[7] Refusals
+    ok  same signature again -> refused: this nonce was already used
+    ok  another wallet takes "demo_user" -> refused: this bonuz ID is linked to another NEAR account; unlink it first
+```
+
+### 3. Run the tests
+
+```bash
+npm test                 # @bonuz/near-link: 33 tests, incl. 25 shared vectors and a cross-check with near-api-js
+npm run test:contract    # the contract: 32 unit tests, 3 sandbox tests, the same 25 vectors (needs Rust + cargo-near)
+```
+
+Rust toolchain for the contract: `rustup` with Rust 1.95, `cargo install cargo-near --version 0.23.0`.
+`npm run build:contract` rebuilds `contracts/registry/res/bonuz_id_registry.wasm`; the sha256 of the
+deployed code is in [`deploy/testnet.json`](deploy/testnet.json).
+
+## How it works
+
+```
+bonuz app (NEAR wallet)          bonuz backend                      NEAR registry (this repo)
+-----------------------          -------------                      -------------------------
+1. ask for a challenge   ---->   32-byte nonce, bound to the
+                                 logged-in bonuz user, 5 min
+2. Face ID, sign NEP-413 ---->   checks the signature with
+   (no tx, no gas)               @bonuz/near-link, checks the
+                                 handle is the user's own,
+                                 writes the verified link to
+                                 the bonuz ID on Base
+                                 registrar function-call key  ---->  link(): re-checks the signature,
+                                                                     the message, the network, the
+                                                                     expiry, the nonce; writes the pair;
+                                                                     pays storage from its own balance
+                                                                     bonuz_of / account_of / link_of
+                                                                     readable by anyone
+```
+
+The message the wallet signs, exactly (LF line endings, nothing else allowed):
+
+```
+Link NEAR account <account_id> to bonuz ID @<handle>
+Network: <testnet|mainnet>
+Expires: <unix seconds>
+```
+
+NEP-413 `recipient` is the registry contract id and the `nonce` is the backend's 32-byte challenge.
+
+### The contract (`contracts/registry`, Rust, near-sdk 5.30.1)
+
+| Method | Who | What |
+|---|---|---|
+| `link(account_id, bonuz_id, public_key, nonce, signature, message)` | registrar only | Verifies the NEP-413 signature (recipient = this contract), parses the message exactly, checks it names this account, this handle and this network, that `now < Expires <= now + 10 min`, and that the nonce was never used. For an implicit account it checks `hex(public_key) == account_id`. One account to one handle: a new signed link from the same account replaces its old handle; a handle held by another account is refused until it is unlinked. Returns the block height. |
+| `unlink_by_registrar(account_id)` | registrar only | Removal only, at most 100 per day (an owner-raised cap falls back to 100 at a set time on its own). |
+| `unlink_by_owner()` | the linked account | Removes its own link (1 yoctoNEAR, full-access key). Works while paused. |
+| `prune_nonces(limit)` | anyone | Deletes up to 50 used nonces whose messages have expired. Never transfers anything. |
+| `bonuz_of`, `account_of`, `link_of`, `status` | views | |
+| `set_registrar`, `set_paused`, `set_reserve`, `set_unlink_daily_cap` | owner, 1 yoctoNEAR | |
+| `migrate_from_v1(old_keys, ...)` | the contract account | One-time testnet upgrade from the 1.x prototype: deletes its state and starts fresh. |
+
+Events (NEP-297, standard `bonuz_id_near`, version `2.0.0`): `link` and `unlink`, where `unlink`
+carries a `reason`: `registrar`, `owner` or `replaced`.
+
+**Why the registrar can use a function-call key.** A function-call access key cannot attach NEAR,
+so it can never pay storage. The contract pays storage from its own pre-funded balance instead and
+refuses to link when that balance falls under a reserve. The key is limited to this contract and to
+`link` and `unlink_by_registrar`, with a capped gas allowance: a leaked key cannot move bonuz's NEAR,
+cannot add or move a link (each one needs a fresh user signature), and can remove at most the day's
+unlink cap, every removal visible on chain.
+
+Measured on testnet: `link` burns about 2.7 Tgas (about 0.0003 NEAR) and stores about 490 bytes for
+an implicit account (0.0049 NEAR, including the nonce record that `prune_nonces` frees after it
+expires); `unlink_by_registrar` burns about 2.1 Tgas.
+
+### `packages/near-link` (TypeScript)
+
+One implementation of the link message, used by the bonuz app (to build and sign), the bonuz backend
+(to check before it calls the registry) and the tests: `buildLinkMessage`, `parseLinkMessage`,
+`nep413Hash`, `signNep413`, `verifyNep413`, `checkLink` (the same checks as the contract, in the same
+order, with the same refusal texts) and a small read-only registry client. It depends only on
+`@noble/hashes`, `@scure/base` and `tweetnacl`.
+
+[`vectors.json`](packages/near-link/vectors.json) holds 25 cases with hand-written expectations:
+valid links, and a valid signature over the wrong recipient, the wrong network, an expired message,
+a different handle, a handle that is a prefix of the real one (`@men` vs `@mende`), the wrong case,
+uppercase implicit hex, an `0x` account, an extra line, `\r\n` line endings and more. The TypeScript
+tests and the Rust contract tests both run this file, so the two implementations cannot drift apart.
+A separate test checks that our NEP-413 signature equals near-api-js's `signNep413Message` byte for
+byte.
+
+## What the contract proves, and what it does not
+
+- bonuz **cannot attach** a NEAR account to a handle without that account's key signing a message
+  that names both the account and that exact handle. The contract checks both, whole strings only.
+- For an **implicit account** (the 64-hex accounts the bonuz app creates) the key-to-account check is
+  done by the contract itself. It proves the key is the account's **original** key, not that it still
+  controls the account: once funded, an implicit account's owner can add or delete keys. In short,
+  the key proves origin, not current control.
+- Whoever holds the NEAR key can link it to their own bonuz ID. If the same seed is imported into two
+  bonuz accounts, the newest verified link wins. Owning the key is the proof; that is by design.
+- The contract **cannot know** that the handle belongs to the person who signed. That part is bonuz's
+  attestation: the registrar only writes for the logged-in owner of the handle.
+- For a **named account** (`alice.near`) the key check is also bonuz's (`checked_by: "registrar"`),
+  and it is a point in time: the key could be removed from the account later. The testnet registry
+  accepts named accounts; a mainnet registry starts with implicit accounts only
+  (`allow_registrar_checked: false`), and the sandbox demo runs in that mode.
+- bonuz **can remove** any link without a user signature (`unlink_by_registrar`, used when a user
+  edits or clears the field on their profile). It **cannot add or move** one. Every removal emits an
+  `unlink` event.
+- Every signed message expires within 10 minutes of block time and every nonce works once, so an old
+  signature can never be replayed later, even after the account's keys change.
+
+## Deployments
 
 | | |
 |---|---|
-| Contract | `id.bonuz.testnet` (version 1.1.0) |
-| Owner (may remove squatted links and set the sponsor, cannot create links) | `bonuz.testnet` |
-| Sponsor (submits one-click links and pays their storage) | `sponsor.bonuz.testnet` |
+| Contract | `id.bonuz.testnet`, version 2.0.0 |
+| Accepts | implicit accounts (checked by the contract) and named accounts (checked by bonuz) |
+| Owner (pause, registrar, caps; cannot link) | `bonuz.testnet` |
+| Registrar (function-call key only) | `registrar.bonuz.testnet` |
 | Explorer | https://testnet.nearblocks.io/address/id.bonuz.testnet |
-| Deploy record | [`deploy/testnet.json`](deploy/testnet.json) |
+| Deploy record, tx hashes, code hash | [`deploy/testnet.json`](deploy/testnet.json) |
 
-Real calls against the live contract (9 Nov 2026). `bonuz.testnet` linked itself to `bonuz`. A
-fresh app-style wallet that was never funded was linked to `bonuz_demo` in one click:
+Mainnet is not deployed yet.
 
-```
-$ near view id.bonuz.testnet bonuz_of '{"account_id":"bonuz.testnet"}' --networkId testnet
-Function execution return value (printed to stdout):
-"bonuz"
+## What was built during the hackathon, and what existed before
 
-$ near view id.bonuz.testnet account_of '{"bonuz_id":"bonuz"}' --networkId testnet
-Function execution return value (printed to stdout):
-"bonuz.testnet"
+Only work committed after 19 Oct 2026 is new. The tag `pre-hackathon` marks the empty baseline of
+this repo; everything here was written in the hackathon window
+([diff](https://github.com/bonuz-market/bonuz-id-near/compare/pre-hackathon...main)).
 
-$ near view id.bonuz.testnet account_of '{"bonuz_id":"bonuz_demo"}' --networkId testnet
-Function execution return value (printed to stdout):
-"1fc703743735f7d47f60bea7d0f916a11fc886bb1404fad8689eb09cc2d29928"
-```
+**Built in the window (this repo, public):** the registry contract and its tests, `@bonuz/near-link`
+and its shared vectors, the sandbox demo, the testnet deploy.
 
-That last account has no balance and does not exist on chain. It never needed NEAR to be linked.
+**Built in the window (bonuz's private repos, using `@bonuz/near-link`):** the "Show on my bonuz ID"
+flow and the NEP-413 message signer in the bonuz app; the `w_near` verify case, challenge route and
+registry outbox in the bonuz backend; the NEAR field on bonuz.id profiles.
 
-## Try it on testnet (about 10 minutes)
+**Existed before (baseline, not part of this entry):**
+- the bonuz app, live in the App Store and Google Play;
+- the bonuz ID and its contract on Base, which already had a `w_near` slot for a NEAR account;
+- the app's NEAR wallet (accounts, balances, sending NEAR and NEP-141 tokens), merged on 14 Oct 2026
+  and not yet released to everyone;
+- the backend's verify flow for socials (the one verifying an X account), which the NEAR case joins.
 
-### 0. Check it with nothing installed
-
-Ask the public testnet RPC which bonuz ID `bonuz.testnet` has:
-
-```bash
-curl -s https://rpc.testnet.near.org -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"query","params":{"request_type":"call_function","finality":"final","account_id":"id.bonuz.testnet","method_name":"bonuz_of","args_base64":"eyJhY2NvdW50X2lkIjoiYm9udXoudGVzdG5ldCJ9"}}'
-```
-
-You see `"result":[34,98,111,110,117,122,34]`, which is the bytes of `"bonuz"`.
-(`args_base64` is `{"account_id":"bonuz.testnet"}` in base64.)
-
-### 1. Install the NEAR CLI
-
-```bash
-npm install -g near-cli-rs@0.31.1
-```
-
-Or, with Rust: `cargo install near-cli-rs --locked`. Check with `near --version`.
-
-### 2. Get a free testnet account
-
-Pick a name nobody has, for example `yourname-bonuz-demo.testnet`. The faucet funds it with 10 test NEAR.
-The key is saved in `~/.near-credentials`.
-
-```bash
-near account create-account sponsor-by-faucet-service yourname-bonuz-demo.testnet autogenerate-new-keypair save-to-legacy-keychain network-config testnet create
-```
-
-### 3. Link it to a handle
-
-Handles are 2 to 32 characters of `a-z`, `0-9` and `_`. Attach 0.006 NEAR for storage; what is not
-needed comes back in the same transaction.
-
-```bash
-near contract call-function as-transaction id.bonuz.testnet link json-args '{"bonuz_id":"yourname_demo"}' prepaid-gas '30.0 Tgas' attached-deposit '0.006 NEAR' sign-as yourname-bonuz-demo.testnet network-config testnet sign-with-legacy-keychain send
-```
-
-You see the event in the logs:
-
-```
-EVENT_JSON:{"standard":"bonuz_id_near","version":"1.0.0","event":"link","data":{"account_id":"yourname-bonuz-demo.testnet","bonuz_id":"yourname_demo"}}
-```
-
-### 4. Look it up both ways
-
-```bash
-near view id.bonuz.testnet bonuz_of '{"account_id":"yourname-bonuz-demo.testnet"}' --networkId testnet
-```
-
-```bash
-near view id.bonuz.testnet account_of '{"bonuz_id":"yourname_demo"}' --networkId testnet
-```
-
-You see `"yourname_demo"` and `"yourname-bonuz-demo.testnet"`.
-
-### 5. See what the contract refuses
-
-Try to take the demo handle that `bonuz.testnet` already holds:
-
-```bash
-near contract call-function as-transaction id.bonuz.testnet link json-args '{"bonuz_id":"bonuz"}' prepaid-gas '30.0 Tgas' attached-deposit '0.006 NEAR' sign-as yourname-bonuz-demo.testnet network-config testnet sign-with-legacy-keychain send
-```
-
-You see `this bonuz ID is already linked to another NEAR account`. A handle like `Yourname` or `a`
-fails with a message about the allowed characters or length.
-
-### 6. Unlink and get the storage back
-
-```bash
-near contract call-function as-transaction id.bonuz.testnet unlink json-args '{}' prepaid-gas '30.0 Tgas' attached-deposit '1 yoctoNEAR' sign-as yourname-bonuz-demo.testnet network-config testnet sign-with-legacy-keychain send
-```
-
-`bonuz_of` now returns `null` and the storage deposit is back in your account.
-
-### 7. The one-click path, the way the app signs it
-
-Only the bonuz sponsor can submit a one-click link, so on testnet you can make and check the
-signature yourself. The repo has a small tool that acts like the app wallet (needs Rust, see
-"Build and test"):
-
-```bash
-cd contracts/registry && cargo run -q --example app_wallet -- new /tmp/demo-wallet.key
-```
-
-It prints a new implicit account id, a key that exists only on your machine. Ask the contract for
-the exact text to sign, then sign it:
-
-```bash
-near view id.bonuz.testnet signed_link_message '{"account_id":"<printed id>","bonuz_id":"yourname_app"}' --networkId testnet
-```
-
-```bash
-cargo run -q --example app_wallet -- sign /tmp/demo-wallet.key "Link this NEAR account to bonuz ID yourname_app (#0)" id.bonuz.testnet
-```
-
-The output is the `account_id`, `nonce` and `signature` the sponsor passes to `link_signed`. Calling
-`link_signed` from your own account shows the guard: `only the bonuz sponsor account can submit
-signed calls`. The full flow is covered by the sandbox tests.
-
-## Methods
-
-| Method | Kind | Who | What |
-|---|---|---|---|
-| `link(bonuz_id: String)` | change, payable | the NEAR account itself | Links the caller to `bonuz_id`. Replaces the caller's earlier link and frees the old handle. Refuses a handle linked to another account. Needs a deposit of at least the storage cost (`link_deposit()` always covers it, excess is refunded). Linking the same handle again changes nothing and refunds everything. |
-| `link_signed(account_id, bonuz_id, nonce, signature)` | change, payable | sponsor only | One-click link for an implicit account. `signature` is a NEP-413 signature by that account's key over `signed_link_message(account_id, bonuz_id)`, recipient `id.bonuz.testnet`, no callback URL. `nonce` and `signature` are base64. The sponsor pays the storage. A handle held by another account is taken over, since bonuz vouches for the handle. |
-| `unlink()` | change, 1 yoctoNEAR | the NEAR account itself | Removes the caller's link and refunds the storage to whoever paid it. |
-| `unlink_signed(account_id, nonce, signature)` | change, payable | sponsor only | Same as `unlink` for an implicit account, signed over `signed_unlink_message(account_id)`. |
-| `admin_unlink(bonuz_id: String)` | change, 1 yoctoNEAR | owner only | Removes a squatted link. The storage refund goes to whoever paid it. |
-| `set_sponsor(sponsor_id: Option<AccountId>)` | change, 1 yoctoNEAR | owner only | Sets or clears the sponsor. |
-| `bonuz_of(account_id) -> Option<String>` | view | anyone | The handle linked to a NEAR account. |
-| `account_of(bonuz_id) -> Option<AccountId>` | view | anyone | The NEAR account linked to a handle. |
-| `signed_link_message(account_id, bonuz_id) -> String` | view | anyone | The exact text to sign for `link_signed` right now. |
-| `signed_unlink_message(account_id) -> String` | view | anyone | The exact text to sign for `unlink_signed` right now. |
-| `payer_of(account_id) -> Option<AccountId>` | view | anyone | Who paid the storage of a link: the account or the sponsor. |
-| `link_deposit() -> NearToken` | view | anyone | A deposit that always covers one link (0.006 NEAR). |
-| `owner()`, `sponsor()` | view | anyone | The owner and sponsor accounts. |
-| `new(owner_id, sponsor_id)` | init, private | the contract account | Run once, in the deploy transaction. |
-| `migrate(sponsor_id)` | init, private | the contract account | Upgrades version 1.0.0 state, in the deploy transaction. |
-
-Every change needs an attached deposit, so only a full-access key can change a link. A
-function-call access key (for example one a dapp got at login) cannot.
-
-Each signed message ends in a counter (`#0`, `#1`, ...) that goes up with every signed call, so a
-signature works only once.
-
-### Events (NEP-297, standard `bonuz_id_near`, version `1.0.0`)
-
-```
-EVENT_JSON:{"standard":"bonuz_id_near","version":"1.0.0","event":"link","data":{"account_id":"alice.testnet","bonuz_id":"alice","previous_bonuz_id":"old_handle"}}
-EVENT_JSON:{"standard":"bonuz_id_near","version":"1.0.0","event":"link","data":{"account_id":"1fc7...9928","bonuz_id":"bonuz_demo","sponsored_by":"sponsor.bonuz.testnet"}}
-EVENT_JSON:{"standard":"bonuz_id_near","version":"1.0.0","event":"unlink","data":{"account_id":"alice.testnet","bonuz_id":"alice"}}
-```
-
-`previous_bonuz_id` appears only on a relink, `sponsored_by` only on a one-click link. `removed_by`
-appears on `unlink` only when someone other than the account removed it.
-
-### Trust model
-
-- A **self-made link** proves who controls the NEAR account. It does not prove who controls the
-  bonuz ID: anyone can claim a free handle.
-- A **one-click link** is submitted by the bonuz sponsor only after the user is signed in to that
-  bonuz ID in the app, so it also carries bonuz's word that the handle is theirs. It replaces a
-  squatter.
-- bonuz shows a NEAR account as verified on a profile only when both sides agree: this registry says
-  account to handle, and the bonuz ID on Base says handle to account.
-- The owner can remove a squatted link with `admin_unlink`. The contract account keeps its own key,
-  so bonuz can upgrade it (testnet).
-- This is "a bonuz ID with real-world activity", not proof of personhood: bonuz does no biometrics.
-
-## Build and test
-
-Needs Rust (stable, tested on 1.95), the `wasm32-unknown-unknown` target and `cargo-near`
-0.23. The sandbox tests download a local NEAR node on the first run.
-
-```bash
-rustup target add wasm32-unknown-unknown
-```
-
-```bash
-cargo install cargo-near --locked
-```
-
-```bash
-cd contracts/registry && cargo test
-```
-
-This runs 7 unit tests and 16 sandbox tests with `near-workspaces`. They cover link, relink,
-same-handle no-op, conflict refusal, unlink with storage refund, excess deposit refund and too-small
-deposit refused, invalid handles refused, the 1 yoctoNEAR rule, owner-only `admin_unlink` and
-`set_sponsor`, private init, and the one-click path: an unfunded app wallet linked by the sponsor,
-replayed signatures refused, wrong key, changed handle, named accounts and non-sponsor callers
-refused, a squatter replaced, and a signed unlink that refunds the sponsor. Expected end:
-
-```
-test result: ok. 7 passed; 0 failed; ...
-test result: ok. 16 passed; 0 failed; ...
-```
-
-Build the wasm that is deployed (sha256 in `deploy/testnet.json`):
-
-```bash
-cd contracts/registry && cargo near build non-reproducible-wasm
-```
-
-## What existed before the hackathon
-
-Code from before 19 Oct 2026 is baseline, it lives in other (private) repos and is not part of this entry:
-
-- **The bonuz app** (iOS and Android), with bonuz ID profiles and real-world check-ins.
-- **bonuz ID on Base**: the profile contract already has a `w_near` slot for a NEAR account, unused until now.
-- **A NEAR wallet inside the bonuz app**: accounts, balances, sending NEAR and tokens. Merged on 14 Oct 2026, not released yet (behind a switch that is off in the store build).
-
-**Everything in this repo is new.** The repo starts with an empty commit tagged
-[`pre-hackathon`](https://github.com/bonuz-market/bonuz-id-near/releases/tag/pre-hackathon), so the
-judged diff is everything after it. All code here was written with Claude.
+**AI-written code:** all code in this repo was written with Claude (Anthropic), directed by the
+bonuz team.
 
 ## Roadmap
 
-1. **bonuz ID on NEAR** (this hackathon): a NEAR account becomes one more identifier on a bonuz ID, next to socials, ENS and EVM wallets, verified, shown on the profile, readable by agents.
-2. **NEAR in the bonuz wallet**: already built, switched on for the demo; later sign in with a NEAR account and simple named-account and key tools.
-3. **Agents**: AI agents already get bonuz IDs; give them a NEAR account too, then list agentic NEAR apps in bonuz discovery. Research first.
+- **Stage 2:** NEAR for every bonuz user in the wallet, and sign in with a NEAR account.
+- **Stage 3:** AI agents, which already get bonuz IDs today, get a NEAR account too, so an agent has
+  an identity and a wallet in one place.
 
 ## License
 
