@@ -8,8 +8,10 @@ use serde_json::{json, Value};
 const DEPOSIT: NearToken = NearToken::from_millinear(10); // 0.01 NEAR, far more than needed
 
 struct Env {
+    sandbox: near_workspaces::Worker<near_workspaces::network::Sandbox>,
     contract: Contract,
     owner: Account,
+    sponsor: Account,
     alice: Account,
     bob: Account,
 }
@@ -27,9 +29,15 @@ async fn setup() -> anyhow::Result<Env> {
         .transact()
         .await?
         .into_result()?;
+    let sponsor = root
+        .create_subaccount("sponsor")
+        .initial_balance(NearToken::from_near(10))
+        .transact()
+        .await?
+        .into_result()?;
     contract
         .call("new")
-        .args_json(json!({ "owner_id": owner.id() }))
+        .args_json(json!({ "owner_id": owner.id(), "sponsor_id": sponsor.id() }))
         .transact()
         .await?
         .into_result()?;
@@ -46,7 +54,7 @@ async fn setup() -> anyhow::Result<Env> {
         .transact()
         .await?
         .into_result()?;
-    Ok(Env { contract, owner, alice, bob })
+    Ok(Env { sandbox, contract, owner, sponsor, alice, bob })
 }
 
 async fn bonuz_of(env: &Env, account: &Account) -> anyhow::Result<Option<String>> {
@@ -332,10 +340,259 @@ async fn only_the_contract_account_can_initialise() -> anyhow::Result<()> {
 
     let res = mallory
         .call(contract.id(), "new")
-        .args_json(json!({ "owner_id": mallory.id() }))
+        .args_json(json!({ "owner_id": mallory.id(), "sponsor_id": null }))
         .transact()
         .await?;
     assert!(res.is_failure(), "a stranger must not be able to initialise and become owner");
     assert!(format!("{res:?}").contains("is private"));
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// One-click path: wallets created in the bonuz app are NEAR implicit accounts.
+// The app signs a NEP-413 message, the bonuz sponsor submits it and pays.
+// ---------------------------------------------------------------------------
+
+use base64::Engine as _;
+use ed25519_dalek::{Signer, SigningKey};
+use sha2::{Digest, Sha256};
+
+/// A wallet as the bonuz app creates it: a fresh ed25519 key whose implicit
+/// account id (hex of the public key) does not exist on chain yet.
+struct AppWallet {
+    key: SigningKey,
+    account_id: String,
+}
+
+fn app_wallet() -> AppWallet {
+    let key = SigningKey::generate(&mut rand::rngs::OsRng);
+    let account_id = hex::encode(key.verifying_key().to_bytes());
+    AppWallet { key, account_id }
+}
+
+#[derive(borsh::BorshSerialize)]
+struct Nep413Payload {
+    message: String,
+    nonce: [u8; 32],
+    recipient: String,
+    callback_url: Option<String>,
+}
+
+/// NEP-413 signature, the way a NEAR wallet signs a message. Returns (nonce, signature) in base64.
+fn nep413_sign(key: &SigningKey, message: &str, recipient: &str) -> (String, String) {
+    let nonce: [u8; 32] = rand::random();
+    let payload = Nep413Payload {
+        message: message.to_owned(),
+        nonce,
+        recipient: recipient.to_owned(),
+        callback_url: None,
+    };
+    let mut data = ((1u32 << 31) + 413).to_le_bytes().to_vec();
+    data.extend(borsh::to_vec(&payload).unwrap());
+    let signature = key.sign(&Sha256::digest(&data));
+    let b64 = base64::engine::general_purpose::STANDARD;
+    (b64.encode(nonce), b64.encode(signature.to_bytes()))
+}
+
+async fn signed_link_args(env: &Env, wallet: &AppWallet, bonuz_id: &str) -> anyhow::Result<Value> {
+    let message: String = env
+        .contract
+        .view("signed_link_message")
+        .args_json(json!({ "account_id": wallet.account_id, "bonuz_id": bonuz_id }))
+        .await?
+        .json()?;
+    let (nonce, signature) = nep413_sign(&wallet.key, &message, env.contract.id().as_str());
+    Ok(json!({ "account_id": wallet.account_id, "bonuz_id": bonuz_id, "nonce": nonce, "signature": signature }))
+}
+
+async fn submit(
+    by: &Account,
+    env: &Env,
+    method: &str,
+    args: &Value,
+) -> anyhow::Result<near_workspaces::result::ExecutionFinalResult> {
+    Ok(by
+        .call(env.contract.id(), method)
+        .args_json(args)
+        .deposit(DEPOSIT)
+        .max_gas()
+        .transact()
+        .await?)
+}
+
+async fn bonuz_of_id(env: &Env, account_id: &str) -> anyhow::Result<Option<String>> {
+    Ok(env
+        .contract
+        .view("bonuz_of")
+        .args_json(json!({ "account_id": account_id }))
+        .await?
+        .json()?)
+}
+
+#[tokio::test]
+async fn app_wallet_links_in_one_click_without_any_near() -> anyhow::Result<()> {
+    let env = setup().await?;
+    let wallet = app_wallet();
+
+    let args = signed_link_args(&env, &wallet, "mende").await?;
+    let res = submit(&env.sponsor, &env, "link_signed", &args).await?;
+    assert!(res.is_success(), "{res:#?}");
+
+    assert_eq!(bonuz_of_id(&env, &wallet.account_id).await?.as_deref(), Some("mende"));
+    assert_eq!(account_of(&env, "mende").await?.as_deref(), Some(wallet.account_id.as_str()));
+
+    let ev = event(&res.logs());
+    assert_eq!(ev["event"], "link");
+    assert_eq!(ev["data"]["account_id"], wallet.account_id.as_str());
+    assert_eq!(ev["data"]["sponsored_by"], env.sponsor.id().as_str());
+
+    let payer: Option<String> = env
+        .contract
+        .view("payer_of")
+        .args_json(json!({ "account_id": wallet.account_id }))
+        .await?
+        .json()?;
+    assert_eq!(payer.as_deref(), Some(env.sponsor.id().as_str()));
+
+    // The user's account still does not exist on chain: it never needed NEAR.
+    let id: near_workspaces::AccountId = wallet.account_id.parse()?;
+    assert!(env.sandbox.view_account(&id).await.is_err(), "implicit account should not exist on chain");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_signature_works_only_once() -> anyhow::Result<()> {
+    let env = setup().await?;
+    let wallet = app_wallet();
+    let args = signed_link_args(&env, &wallet, "mende").await?;
+    submit(&env.sponsor, &env, "link_signed", &args).await?.into_result()?;
+
+    // The user later moves to another handle; replaying the old signature must fail.
+    let args2 = signed_link_args(&env, &wallet, "mende_two").await?;
+    submit(&env.sponsor, &env, "link_signed", &args2).await?.into_result()?;
+    let replay = submit(&env.sponsor, &env, "link_signed", &args).await?;
+    assert!(replay.is_failure());
+    assert!(format!("{replay:?}").contains("invalid signature"));
+    assert_eq!(bonuz_of_id(&env, &wallet.account_id).await?.as_deref(), Some("mende_two"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn signed_link_refuses_wrong_key_tampered_handle_named_account_and_strangers() -> anyhow::Result<()> {
+    let env = setup().await?;
+    let wallet = app_wallet();
+    let other = app_wallet();
+
+    // Signed by another key.
+    let mut args = signed_link_args(&env, &other, "mende").await?;
+    args["account_id"] = json!(wallet.account_id);
+    let res = submit(&env.sponsor, &env, "link_signed", &args).await?;
+    assert!(format!("{res:?}").contains("invalid signature"));
+
+    // Handle changed after signing.
+    let mut args = signed_link_args(&env, &wallet, "mende").await?;
+    args["bonuz_id"] = json!("someone_else");
+    let res = submit(&env.sponsor, &env, "link_signed", &args).await?;
+    assert!(format!("{res:?}").contains("invalid signature"));
+
+    // A named account cannot use the signed path: its key is not in its name.
+    let mut args = signed_link_args(&env, &wallet, "mende").await?;
+    args["account_id"] = json!(env.alice.id());
+    let res = submit(&env.sponsor, &env, "link_signed", &args).await?;
+    assert!(format!("{res:?}").contains("only work for implicit NEAR accounts"));
+
+    // A valid signature submitted by anyone but the sponsor.
+    let args = signed_link_args(&env, &wallet, "mende").await?;
+    let res = submit(&env.alice, &env, "link_signed", &args).await?;
+    assert!(format!("{res:?}").contains("only the bonuz sponsor account"));
+
+    assert_eq!(bonuz_of_id(&env, &wallet.account_id).await?, None);
+    assert_eq!(account_of(&env, "mende").await?, None);
+
+    // The untouched signature still works from the sponsor.
+    submit(&env.sponsor, &env, "link_signed", &args).await?.into_result()?;
+    assert_eq!(bonuz_of_id(&env, &wallet.account_id).await?.as_deref(), Some("mende"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn sponsored_link_takes_a_handle_back_from_a_squatter() -> anyhow::Result<()> {
+    let env = setup().await?;
+    link(&env.bob, &env, "mende").await?.into_result()?; // bob squats
+
+    let wallet = app_wallet();
+    let args = signed_link_args(&env, &wallet, "mende").await?;
+    let res = submit(&env.sponsor, &env, "link_signed", &args).await?;
+    assert!(res.is_success(), "{res:#?}");
+
+    assert_eq!(account_of(&env, "mende").await?.as_deref(), Some(wallet.account_id.as_str()));
+    assert_eq!(bonuz_of(&env, &env.bob).await?, None);
+    let unlink_log = res
+        .logs()
+        .into_iter()
+        .find(|l| l.contains("\"event\":\"unlink\""))
+        .expect("squatter's link removed with an unlink event");
+    assert!(unlink_log.contains(env.bob.id().as_str()));
+    assert!(unlink_log.contains("\"removed_by\""));
+    Ok(())
+}
+
+#[tokio::test]
+async fn signed_unlink_refunds_the_sponsor() -> anyhow::Result<()> {
+    let env = setup().await?;
+    let wallet = app_wallet();
+    let empty = env.contract.view_account().await?.storage_usage;
+    let args = signed_link_args(&env, &wallet, "mende").await?;
+    submit(&env.sponsor, &env, "link_signed", &args).await?.into_result()?;
+
+    let message: String = env
+        .contract
+        .view("signed_unlink_message")
+        .args_json(json!({ "account_id": wallet.account_id }))
+        .await?
+        .json()?;
+    let (nonce, signature) = nep413_sign(&wallet.key, &message, env.contract.id().as_str());
+    let before = env.sponsor.view_account().await?.balance;
+    let res = submit(
+        &env.sponsor,
+        &env,
+        "unlink_signed",
+        &json!({ "account_id": wallet.account_id, "nonce": nonce, "signature": signature }),
+    )
+    .await?;
+    assert!(res.is_success(), "{res:#?}");
+    let after = env.sponsor.view_account().await?.balance;
+
+    assert_eq!(bonuz_of_id(&env, &wallet.account_id).await?, None);
+    assert_eq!(account_of(&env, "mende").await?, None);
+    // Only the replay counter stays (so old signatures stay dead).
+    let left = env.contract.view_account().await?.storage_usage - empty;
+    assert!(left > 0 && left < 150, "only the counter record should remain, {left} bytes left");
+    // The sponsor got the link storage back, more than the gas it spent.
+    assert!(after > before, "sponsor balance {before} -> {after}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn only_the_owner_can_change_the_sponsor() -> anyhow::Result<()> {
+    let env = setup().await?;
+    let set = |by: &Account, who: Value| {
+        by.call(env.contract.id(), "set_sponsor")
+            .args_json(json!({ "sponsor_id": who }))
+            .deposit(ONE_YOCTO)
+            .transact()
+    };
+    let res = set(&env.alice, json!(env.alice.id())).await?;
+    assert!(format!("{res:?}").contains("only the registry owner"));
+
+    set(&env.owner, json!(env.alice.id())).await?.into_result()?;
+    let sponsor: Option<String> = env.contract.view("sponsor").await?.json()?;
+    assert_eq!(sponsor.as_deref(), Some(env.alice.id().as_str()));
+
+    // The old sponsor is locked out.
+    let wallet = app_wallet();
+    let args = signed_link_args(&env, &wallet, "mende").await?;
+    let res = submit(&env.sponsor, &env, "link_signed", &args).await?;
+    assert!(format!("{res:?}").contains("only the bonuz sponsor account"));
     Ok(())
 }

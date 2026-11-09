@@ -216,12 +216,18 @@ dependencies = [
 
 [[package]]
 name = "bonuz-id-registry"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "borsh",
+ "ed25519-dalek",
+ "hex",
  "near-sdk",
  "near-workspaces",
+ "rand 0.8.8",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
 ]
 
@@ -882,6 +888,7 @@ version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
 dependencies = [
+ "pkcs8",
  "signature",
 ]
 
@@ -894,8 +901,10 @@ dependencies = [
  "curve25519-dalek",
  "ed25519",
  "rand_core 0.6.4",
+ "serde",
  "sha2 0.10.9",
  "subtle",
+ "zeroize",
 ]
 
 [[package]]
