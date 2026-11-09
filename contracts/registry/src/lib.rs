@@ -87,7 +87,9 @@ pub fn assert_valid_bonuz_id(bonuz_id: &str) {
 
 #[near]
 impl Registry {
+    /// Only the contract account itself can initialise (no front-running).
     #[init]
+    #[private]
     pub fn new(owner_id: AccountId) -> Self {
         Self {
             owner_id,

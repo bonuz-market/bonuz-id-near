@@ -102,8 +102,8 @@ async fn link_sets_both_views_and_emits_event() -> anyhow::Result<()> {
     assert_eq!(ev["standard"], "bonuz_id_near");
     assert_eq!(ev["version"], "1.0.0");
     assert_eq!(ev["event"], "link");
-    assert_eq!(ev["data"][0]["account_id"], env.alice.id().as_str());
-    assert_eq!(ev["data"][0]["bonuz_id"], "mende");
+    assert_eq!(ev["data"]["account_id"], env.alice.id().as_str());
+    assert_eq!(ev["data"]["bonuz_id"], "mende");
     Ok(())
 }
 
@@ -120,7 +120,7 @@ async fn relink_replaces_the_old_handle() -> anyhow::Result<()> {
     assert_eq!(account_of(&env, "mende").await?, None, "old handle must be freed");
 
     let ev = event(&res.logs());
-    assert_eq!(ev["data"][0]["previous_bonuz_id"], "mende");
+    assert_eq!(ev["data"]["previous_bonuz_id"], "mende");
 
     // The freed handle can now be taken by someone else.
     link(&env.bob, &env, "mende").await?.into_result()?;
@@ -186,7 +186,7 @@ async fn unlink_clears_both_views_and_refunds_storage() -> anyhow::Result<()> {
 
     let ev = event(&res.logs());
     assert_eq!(ev["event"], "unlink");
-    assert_eq!(ev["data"][0]["bonuz_id"], "mende");
+    assert_eq!(ev["data"]["bonuz_id"], "mende");
 
     // Unlink twice fails cleanly.
     let again = env
@@ -311,8 +311,8 @@ async fn owner_can_clear_a_squatted_handle_others_cannot() -> anyhow::Result<()>
     assert!(res.is_success(), "{res:#?}");
     let ev = event(&res.logs());
     assert_eq!(ev["event"], "unlink");
-    assert_eq!(ev["data"][0]["account_id"], env.bob.id().as_str());
-    assert_eq!(ev["data"][0]["removed_by"], env.owner.id().as_str());
+    assert_eq!(ev["data"]["account_id"], env.bob.id().as_str());
+    assert_eq!(ev["data"]["removed_by"], env.owner.id().as_str());
 
     assert_eq!(account_of(&env, "mende").await?, None);
     assert_eq!(bonuz_of(&env, &env.bob).await?, None);
@@ -320,5 +320,22 @@ async fn owner_can_clear_a_squatted_handle_others_cannot() -> anyhow::Result<()>
     // The real owner of the handle can now link it.
     link(&env.alice, &env, "mende").await?.into_result()?;
     assert_eq!(account_of(&env, "mende").await?.as_deref(), Some(env.alice.id().as_str()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn only_the_contract_account_can_initialise() -> anyhow::Result<()> {
+    let wasm = near_workspaces::compile_project("./").await?;
+    let sandbox = near_workspaces::sandbox().await?;
+    let contract = sandbox.dev_deploy(&wasm).await?;
+    let mallory = sandbox.dev_create_account().await?;
+
+    let res = mallory
+        .call(contract.id(), "new")
+        .args_json(json!({ "owner_id": mallory.id() }))
+        .transact()
+        .await?;
+    assert!(res.is_failure(), "a stranger must not be able to initialise and become owner");
+    assert!(format!("{res:?}").contains("is private"));
     Ok(())
 }
