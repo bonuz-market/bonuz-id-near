@@ -8,9 +8,18 @@
 //! One NEAR account maps to at most one bonuz ID and one bonuz ID maps to at
 //! most one NEAR account. Callers pay for the storage their entry uses and get
 //! it back when they unlink or relink to a shorter handle.
+//!
+//! Trust model: a link here is the NEAR account's claim. It proves who controls
+//! the NEAR account, not who controls the bonuz ID. A link counts as verified
+//! only when the bonuz ID on Base points back at the same NEAR account (its
+//! `w_near` slot). The contract owner can remove a squatted claim with
+//! `admin_unlink`.
 
 use near_sdk::store::LookupMap;
-use near_sdk::{env, near, AccountId, BorshStorageKey, NearToken, PanicOnDefault, Promise, StorageUsage};
+use near_sdk::{
+    assert_one_yocto, env, near, require, AccountId, BorshStorageKey, NearToken, PanicOnDefault,
+    Promise, StorageUsage,
+};
 
 /// Shortest allowed bonuz ID handle.
 pub const MIN_LEN: usize = 2;
@@ -32,6 +41,8 @@ enum StorageKey {
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct Registry {
+    /// May remove squatted links with `admin_unlink`. Cannot create links.
+    owner_id: AccountId,
     /// NEAR account -> bonuz ID handle.
     bonuz_of: LookupMap<AccountId, String>,
     /// bonuz ID handle -> NEAR account.
@@ -49,7 +60,13 @@ pub enum RegistryEvent {
         previous_bonuz_id: Option<String>,
     },
     #[event_version("1.0.0")]
-    Unlink { account_id: AccountId, bonuz_id: String },
+    Unlink {
+        account_id: AccountId,
+        bonuz_id: String,
+        /// Set when the owner removed the link, not the account itself.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        removed_by: Option<AccountId>,
+    },
 }
 
 /// Panics unless `bonuz_id` is 2 to 32 chars of `a-z`, `0-9` or `_`.
@@ -71,8 +88,9 @@ pub fn assert_valid_bonuz_id(bonuz_id: &str) {
 #[near]
 impl Registry {
     #[init]
-    pub fn new() -> Self {
+    pub fn new(owner_id: AccountId) -> Self {
         Self {
+            owner_id,
             bonuz_of: LookupMap::new(StorageKey::BonuzOf),
             account_of: LookupMap::new(StorageKey::AccountOf),
         }
@@ -81,12 +99,17 @@ impl Registry {
     /// Links the calling NEAR account to `bonuz_id`, replacing any earlier
     /// link of this account. Refuses a handle already linked to another
     /// account. Attach enough NEAR for storage (see `link_deposit`); any
-    /// excess is refunded in the same call.
+    /// excess is refunded in the same call. A deposit of at least 1 yoctoNEAR
+    /// is always required, so only a full-access key can change a link.
     #[payable]
     pub fn link(&mut self, bonuz_id: String) {
         assert_valid_bonuz_id(&bonuz_id);
         let account_id = env::predecessor_account_id();
         let attached = env::attached_deposit();
+        require!(
+            !attached.is_zero(),
+            "attach at least 1 yoctoNEAR (see link_deposit) so the call needs a full-access key"
+        );
 
         if let Some(owner) = self.account_of.get(&bonuz_id) {
             if owner != &account_id {
@@ -104,8 +127,7 @@ impl Registry {
         }
         self.account_of.insert(bonuz_id.clone(), account_id.clone());
         // `store` collections write on flush; flush now so storage_usage is real.
-        self.bonuz_of.flush();
-        self.account_of.flush();
+        self.flush();
         let after = env::storage_usage();
 
         let refund_amount = if after >= before {
@@ -128,21 +150,35 @@ impl Registry {
     }
 
     /// Removes the caller's link and refunds the storage it used.
-    /// Panics if the caller has no link.
+    /// Attach exactly 1 yoctoNEAR (full-access key). Panics if there is no link.
+    #[payable]
     pub fn unlink(&mut self) {
+        assert_one_yocto();
         let account_id = env::predecessor_account_id();
-        let before = env::storage_usage();
         let bonuz_id = self
             .bonuz_of
-            .remove(&account_id)
+            .get(&account_id)
+            .cloned()
             .unwrap_or_else(|| env::panic_str("this NEAR account has no bonuz ID linked"));
-        self.account_of.remove(&bonuz_id);
-        self.bonuz_of.flush();
-        self.account_of.flush();
-        let freed = before.saturating_sub(env::storage_usage());
-        refund(&account_id, storage_cost(freed));
+        self.remove_link(account_id, bonuz_id, None);
+    }
 
-        RegistryEvent::Unlink { account_id, bonuz_id }.emit();
+    /// Owner only: removes the link of `bonuz_id` (for example a squatted
+    /// handle) and refunds its storage to the NEAR account that paid for it.
+    /// Attach exactly 1 yoctoNEAR.
+    #[payable]
+    pub fn admin_unlink(&mut self, bonuz_id: String) {
+        assert_one_yocto();
+        require!(
+            env::predecessor_account_id() == self.owner_id,
+            "only the registry owner can call admin_unlink"
+        );
+        let account_id = self
+            .account_of
+            .get(&bonuz_id)
+            .cloned()
+            .unwrap_or_else(|| env::panic_str("this bonuz ID has no NEAR account linked"));
+        self.remove_link(account_id, bonuz_id, Some(self.owner_id.clone()));
     }
 
     /// The bonuz ID linked to `account_id`, if any.
@@ -158,6 +194,31 @@ impl Registry {
     /// A deposit that always covers one `link` call. The unused part is refunded.
     pub fn link_deposit(&self) -> NearToken {
         storage_cost(MAX_LINK_BYTES)
+    }
+
+    /// The account allowed to call `admin_unlink`.
+    pub fn owner(&self) -> AccountId {
+        self.owner_id.clone()
+    }
+}
+
+impl Registry {
+    fn flush(&mut self) {
+        self.bonuz_of.flush();
+        self.account_of.flush();
+    }
+
+    /// Deletes both records, refunds the freed storage to `account_id`
+    /// (the account that paid for it) and emits `unlink`.
+    fn remove_link(&mut self, account_id: AccountId, bonuz_id: String, removed_by: Option<AccountId>) {
+        let before = env::storage_usage();
+        self.bonuz_of.remove(&account_id);
+        self.account_of.remove(&bonuz_id);
+        self.flush();
+        let freed = before.saturating_sub(env::storage_usage());
+        refund(&account_id, storage_cost(freed));
+
+        RegistryEvent::Unlink { account_id, bonuz_id, removed_by }.emit();
     }
 }
 
