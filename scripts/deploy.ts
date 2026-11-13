@@ -74,20 +74,19 @@ const PROFILES: Record<Network, () => Profile> = {
   mainnet: () => ({
     // rpc.mainnet.near.org is deprecated and heavily rate limited.
     rpc: process.env.NEAR_RPC ?? 'https://rpc.mainnet.fastnear.com',
-    owner: 'bonuz.near',
-    contract: 'id.bonuz.near',
-    registrar: 'registrar.bonuz.near',
+    // bonuz-id.near, not bonuz.near: the bonuz.near seed is not at hand (13 Nov 2026). Made by
+    // scripts/owner-wallet.ts; its 12 words are in ~/.near-credentials/mainnet/owner-wallet.seed.txt.
+    owner: 'bonuz-id.near',
+    contract: 'id.bonuz-id.near',
+    registrar: 'registrar.bonuz-id.near',
     contractFunding: 6n, // ~1.9 code + 1 reserve + ~3.1 for about 630-940 links; top up any time by sending NEAR
     registrarFunding: 1n, // ~0.2 mNEAR gas per call: thousands of calls
     keyAllowance: 2n, // the backend alerts under 1 NEAR left, so it must start above that
     reserve: 1n,
     allowRegistrarChecked: false, // implicit (app) accounts only, checked by the contract itself
-    // Read 10 Nov 2026 from rpc.mainnet.fastnear.com and rpc.mainnet.near.org (identical).
-    ownerKeys: [
-      'ed25519:CDYLQ4YE5gJ6UHCyfy578tiWCEg3pEsYKLD9Pwz1GKHj',
-      'ed25519:CcWtkSWQBHFHqmeiz6JmF4auBBC9fv2EFpS1cqixXidd',
-    ],
-    explorer: 'https://nearblocks.io/address/id.bonuz.near',
+    // The owner wallet's one full-access key (scripts/owner-wallet.ts, 13 Nov 2026).
+    ownerKeys: ['ed25519:arfYfuARc7ctKcjEKBg82SnDJQ9jq5uURxDfVi3Ht63'],
+    explorer: 'https://nearblocks.io/address/id.bonuz-id.near',
     record: new URL('../deploy/mainnet.json', import.meta.url),
   }),
   sandbox: () => ({

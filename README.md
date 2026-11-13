@@ -193,17 +193,18 @@ Testnet stays on 2.0.1, the version the hackathon demo links were made with. Ver
 nonce cleanup, two-step owner change, link count, versioned link records) changes the stored layout,
 so it is for fresh deploys, starting with mainnet.
 
-**Mainnet** (`id.bonuz.near`, owner `bonuz.near`, registrar `registrar.bonuz.near`, implicit accounts
-only) is deployed with `node scripts/deploy.ts --network mainnet --yes-mainnet`, rehearsed first on a
-local sandbox by `node scripts/rehearse-deploy.ts`. The owner creates both accounts from their own
-wallet with the keys `--prepare-keys` prints, so the script never holds the `bonuz.near` key.
+**Mainnet** (`id.bonuz-id.near`, owner `bonuz-id.near`, registrar `registrar.bonuz-id.near`, implicit
+accounts only) is deployed with `node scripts/deploy.ts --network mainnet --yes-mainnet`, rehearsed first
+on a local sandbox by `node scripts/rehearse-deploy.ts`. The owner wallet is made on the deploy machine
+by `node scripts/owner-wallet.ts new` (12 words saved owner-only, never printed), funded from any
+exchange or swap, and turned into `bonuz-id.near` by `node scripts/owner-wallet.ts claim --yes-mainnet`.
 
-**Who can change the code.** Code upgrades (state kept) need a full-access key of `id.bonuz.near`.
+**Who can change the code.** Code upgrades (state kept) need a full-access key of `id.bonuz-id.near`.
 There are two kinds: the deploy key (saved in `~/.near-credentials` on the deploy machine; back it up
-offline) and the `bonuz.near` wallet's own keys, which
-the deploy script adds as backups. The `owner` in the contract can pause, change the registrar and
-hand ownership over; it cannot change the code, so handing ownership over with `accept_owner` does not
-hand over upgrade power: rotate the full-access keys of `id.bonuz.near` too.
+offline) and the `bonuz-id.near` owner wallet's key, which the deploy script adds as a backup. The
+`owner` in the contract can pause, change the registrar and hand ownership over; it cannot change the
+code, so handing ownership over with `accept_owner` does not hand over upgrade power: rotate the
+full-access keys of `id.bonuz-id.near` too.
 
 ## What was built during the hackathon, and what existed before
 
