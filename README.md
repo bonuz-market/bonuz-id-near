@@ -180,6 +180,19 @@ byte.
 
 ## Deployments
 
+**Mainnet** (live since 14 Nov 2026)
+
+| | |
+|---|---|
+| Contract | `id.bonuz-id.near`, version 2.1.0 |
+| Accepts | implicit accounts only (checked by the contract itself) |
+| Owner (pause, registrar, caps; cannot link) | `bonuz-id.near` |
+| Registrar (function-call key only) | `registrar.bonuz-id.near` |
+| Explorer | https://nearblocks.io/address/id.bonuz-id.near |
+| Deploy record, tx hashes, code hash | [`deploy/mainnet.json`](deploy/mainnet.json) |
+
+**Testnet**
+
 | | |
 |---|---|
 | Contract | `id.bonuz.testnet`, version 2.0.1 |
