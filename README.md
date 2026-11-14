@@ -21,8 +21,8 @@ You need Node.js 22.18 or newer. Nothing else: the contract wasm is committed.
 ### 0. The live mainnet registry (no install)
 
 The production registry runs on NEAR mainnet at
-[`id.bonuz-id.near`](https://nearblocks.io/address/id.bonuz-id.near), and the bonuz app links to it
-for real users. Ask it for its status:
+[`id.bonuz-id.near`](https://nearblocks.io/address/id.bonuz-id.near), and the bonuz backend in
+production writes to it (the app side is merged and ships with the next app release). Ask it for its status:
 
 ```bash
 curl -s https://rpc.mainnet.fastnear.com -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"query","params":{"request_type":"call_function","finality":"final","account_id":"id.bonuz-id.near","method_name":"status","args_base64":"e30="}}' | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(Buffer.from(JSON.parse(s).result.result).toString()))'
