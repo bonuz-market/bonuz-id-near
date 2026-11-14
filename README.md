@@ -18,6 +18,21 @@ Built for the NEAR HACKATHON (November 2026). All code in this repo was written 
 
 You need Node.js 22.18 or newer. Nothing else: the contract wasm is committed.
 
+### 0. The live mainnet registry (no install)
+
+The production registry runs on NEAR mainnet at
+[`id.bonuz-id.near`](https://nearblocks.io/address/id.bonuz-id.near), and the bonuz app links to it
+for real users. Ask it for its status:
+
+```bash
+curl -s https://rpc.mainnet.fastnear.com -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"query","params":{"request_type":"call_function","finality":"final","account_id":"id.bonuz-id.near","method_name":"status","args_base64":"e30="}}' | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(Buffer.from(JSON.parse(s).result.result).toString()))'
+```
+
+You see `"version":"2.1.0"`, `"network":"mainnet"`, owner `bonuz-id.near`, registrar
+`registrar.bonuz-id.near` and `"links"`, the number of NEAR accounts linked right now. Mainnet links
+implicit accounts only, so the contract itself checks every signature. The steps below use testnet,
+where you can also run the whole flow yourself.
+
 ### 1. Read the live testnet registry (no install)
 
 ```bash
@@ -226,11 +241,14 @@ this repo; everything here was written in the hackathon window
 ([diff](https://github.com/bonuz-market/bonuz-id-near/compare/pre-hackathon...main)).
 
 **Built in the window (this repo, public):** the registry contract and its tests, `@bonuz/near-link`
-and its shared vectors, the sandbox demo, the testnet deploy.
+and its shared vectors, the sandbox demo, the testnet deploy, and the mainnet deploy (`scripts/deploy.ts`,
+`scripts/owner-wallet.ts`, `deploy/mainnet.json`).
 
 **Built in the window (bonuz's private repos, using `@bonuz/near-link`):** the "Show on my bonuz ID"
 flow and the NEP-413 message signer in the bonuz app; the `w_near` verify case, challenge route and
-registry outbox in the bonuz backend; the NEAR field on bonuz.id profiles.
+registry outbox in the bonuz backend, live in production on mainnet since 14 Nov 2026; the NEAR field
+on bonuz.id profiles; `near_account` lookups in the bonuz MCP server's `get_identity` tool, so AI agents
+can ask who a NEAR account belongs to.
 
 **Existed before (baseline, not part of this entry):**
 - the bonuz app, live in the App Store and Google Play;
