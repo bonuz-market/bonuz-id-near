@@ -18,6 +18,21 @@ Built for the NEAR HACKATHON (November 2026). All code in this repo was written 
 
 You need Node.js 22.18 or newer. Nothing else: the contract wasm is committed.
 
+### 0. The live mainnet registry (no install)
+
+The production registry runs on NEAR mainnet at
+[`id.bonuz-id.near`](https://nearblocks.io/address/id.bonuz-id.near), and the bonuz backend in
+production writes to it (the app side is merged and ships with the next app release). Ask it for its status:
+
+```bash
+curl -s https://rpc.mainnet.fastnear.com -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"query","params":{"request_type":"call_function","finality":"final","account_id":"id.bonuz-id.near","method_name":"status","args_base64":"e30="}}' | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(Buffer.from(JSON.parse(s).result.result).toString()))'
+```
+
+You see `"version":"2.1.0"`, `"network":"mainnet"`, owner `bonuz-id.near`, registrar
+`registrar.bonuz-id.near` and `"links"`, the number of NEAR accounts linked right now. Mainnet links
+implicit accounts only, so the contract itself checks every signature. The steps below use testnet,
+where you can also run the whole flow yourself.
+
 ### 1. Read the live testnet registry (no install)
 
 ```bash
@@ -70,7 +85,7 @@ deposit, reads it back, and shows two refusals. You see, among others:
 
 ```bash
 npm test                 # @bonuz/near-link: 35 tests, incl. 27 shared vectors and a cross-check with near-api-js
-npm run test:contract    # the contract: 33 unit tests, 3 sandbox tests, the same 27 vectors (needs Rust + cargo-near)
+npm run test:contract    # the contract: 36 unit tests, 3 sandbox tests, the same 27 vectors (needs Rust + cargo-near)
 ```
 
 Rust toolchain for the contract: `rustup` with Rust 1.95, `cargo install cargo-near --version 0.23.0`.
@@ -114,10 +129,10 @@ NEP-413 `recipient` is the registry contract id and the `nonce` is the backend's
 | `link(account_id, bonuz_id, public_key, nonce, signature, message)` | registrar only | Verifies the NEP-413 signature (recipient = this contract), parses the message exactly, checks it names this account, this handle and this network, that `now < Expires <= now + 10 min`, and that the nonce was never used. For an implicit account it checks `hex(public_key) == account_id`. One account to one handle: a new signed link from the same account replaces its old handle; a handle held by another account is refused until it is unlinked. Returns the block height. |
 | `unlink_by_registrar(account_id)` | registrar only | Removal only, at most 100 per day (an owner-raised cap falls back to 100 at a set time on its own). |
 | `unlink_by_owner()` | the linked account | Removes its own link (1 yoctoNEAR, full-access key). Works while paused. The account needs a little NEAR for gas; an unfunded app wallet removes its link from the bonuz app instead, which uses `unlink_by_registrar`. |
-| `prune_nonces(limit)` | anyone | Deletes up to 50 used nonces whose messages have expired. Never transfers anything. |
-| `bonuz_of`, `account_of`, `link_of`, `status` | views | |
+| `prune_nonces(limit)` | anyone | Deletes up to 50 used nonces whose messages have expired, starting at a random position so cleanup keeps up under steady traffic (each `link` also prunes up to 3). Never transfers anything. |
+| `bonuz_of`, `account_of`, `link_of`, `status` | views | `status` includes the number of linked accounts (`links`). |
 | `set_registrar`, `set_paused`, `set_reserve`, `set_unlink_daily_cap` | owner, 1 yoctoNEAR | |
-| `migrate_from_v1(old_keys, ...)` | the contract account | Testnet upgrade from the 1.x prototype: deletes its state and starts fresh. Refuses to run on 2.x state. |
+| `propose_owner(new_owner)`, then `accept_owner()` | owner, then the proposed account; 1 yoctoNEAR each | Two-step owner change, so a typo cannot lock the owner out. |
 
 Events (NEP-297, standard `bonuz_id_near`, version `2.0.0`): `link` and `unlink`, where `unlink`
 carries a `reason`: `registrar`, `owner` or `replaced`.
@@ -125,9 +140,12 @@ carries a `reason`: `registrar`, `owner` or `replaced`.
 **Why the registrar can use a function-call key.** A function-call access key cannot attach NEAR,
 so it can never pay storage. The contract pays storage from its own pre-funded balance instead and
 refuses to link when that balance falls under a reserve. The key is limited to this contract and to
-`link` and `unlink_by_registrar`, with a capped gas allowance: a leaked key cannot move bonuz's NEAR,
-cannot add or move a link for an implicit account (each one needs a fresh signature by that
-account's own key), and can remove at most the day's unlink cap, every removal visible on chain.
+`link` and `unlink_by_registrar`, with a capped gas allowance: a leaked key cannot move bonuz's NEAR
+and cannot attach a NEAR account it does not hold (each link needs a fresh signature by that
+account's own key). It can remove at most the day's unlink cap, every removal visible on chain, and
+it could re-link a removed handle to an implicit account the attacker holds: which bonuz ID a
+signer may claim is bonuz's attestation, not something the contract can check. The owner stops
+that by pausing or replacing the registrar.
 On a registry that accepts named accounts (testnet does), the contract cannot tie a named account
 to its key, so a leaked registrar key could link a named account it does not hold; that is why a
 mainnet registry starts with implicit accounts only.
@@ -170,12 +188,25 @@ byte.
   accepts named accounts; a mainnet registry starts with implicit accounts only
   (`allow_registrar_checked: false`), and the sandbox demo runs in that mode.
 - bonuz **can remove** any link without a user signature (`unlink_by_registrar`, used when a user
-  edits or clears the field on their profile). It **cannot add or move** one. Every removal emits an
-  `unlink` event.
+  edits or clears the field on their profile). It **cannot attach** a NEAR account to a handle
+  without a fresh signature by that account. Every link and removal emits an event.
 - Every signed message expires within 10 minutes of block time and every nonce works once, so an old
   signature can never be replayed later, even after the account's keys change.
 
 ## Deployments
+
+**Mainnet** (live since 14 Nov 2026)
+
+| | |
+|---|---|
+| Contract | `id.bonuz-id.near`, version 2.1.0 |
+| Accepts | implicit accounts only (checked by the contract itself) |
+| Owner (pause, registrar, caps; cannot link) | `bonuz-id.near` |
+| Registrar (function-call key only) | `registrar.bonuz-id.near` |
+| Explorer | https://nearblocks.io/address/id.bonuz-id.near |
+| Deploy record, tx hashes, code hash | [`deploy/mainnet.json`](deploy/mainnet.json) |
+
+**Testnet**
 
 | | |
 |---|---|
@@ -186,7 +217,22 @@ byte.
 | Explorer | https://testnet.nearblocks.io/address/id.bonuz.testnet |
 | Deploy record, tx hashes, code hash | [`deploy/testnet.json`](deploy/testnet.json) |
 
-Mainnet is not deployed yet.
+Testnet stays on 2.0.1, the version the hackathon demo links were made with. Version 2.1.0 (rotating
+nonce cleanup, two-step owner change, link count, versioned link records) changes the stored layout,
+so it is for fresh deploys, starting with mainnet.
+
+**Mainnet** (`id.bonuz-id.near`, owner `bonuz-id.near`, registrar `registrar.bonuz-id.near`, implicit
+accounts only) is deployed with `node scripts/deploy.ts --network mainnet --yes-mainnet`, rehearsed first
+on a local sandbox by `node scripts/rehearse-deploy.ts`. The owner wallet is made on the deploy machine
+by `node scripts/owner-wallet.ts new` (12 words saved owner-only, never printed), funded from any
+exchange or swap, and turned into `bonuz-id.near` by `node scripts/owner-wallet.ts claim --yes-mainnet`.
+
+**Who can change the code.** Code upgrades (state kept) need a full-access key of `id.bonuz-id.near`.
+There are two kinds: the deploy key (saved in `~/.near-credentials` on the deploy machine; back it up
+offline) and the `bonuz-id.near` owner wallet's key, which the deploy script adds as a backup. The
+`owner` in the contract can pause, change the registrar and hand ownership over; it cannot change the
+code, so handing ownership over with `accept_owner` does not hand over upgrade power: rotate the
+full-access keys of `id.bonuz-id.near` too.
 
 ## What was built during the hackathon, and what existed before
 
@@ -195,11 +241,14 @@ this repo; everything here was written in the hackathon window
 ([diff](https://github.com/bonuz-market/bonuz-id-near/compare/pre-hackathon...main)).
 
 **Built in the window (this repo, public):** the registry contract and its tests, `@bonuz/near-link`
-and its shared vectors, the sandbox demo, the testnet deploy.
+and its shared vectors, the sandbox demo, the testnet deploy, and the mainnet deploy (`scripts/deploy.ts`,
+`scripts/owner-wallet.ts`, `deploy/mainnet.json`).
 
 **Built in the window (bonuz's private repos, using `@bonuz/near-link`):** the "Show on my bonuz ID"
 flow and the NEP-413 message signer in the bonuz app; the `w_near` verify case, challenge route and
-registry outbox in the bonuz backend; the NEAR field on bonuz.id profiles.
+registry outbox in the bonuz backend, live in production on mainnet since 14 Nov 2026; the NEAR field
+on bonuz.id profiles; `near_account` lookups in the bonuz MCP server's `get_identity` tool, so AI agents
+can ask who a NEAR account belongs to.
 
 **Existed before (baseline, not part of this entry):**
 - the bonuz app, live in the App Store and Google Play;

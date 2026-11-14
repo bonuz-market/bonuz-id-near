@@ -14,7 +14,9 @@
     "demo": "node scripts/demo.ts",
     "test": "npm test -w @bonuz/near-link",
     "test:contract": "cd contracts/registry && cargo test",
-    "deploy:testnet": "node scripts/deploy-testnet.ts"
+    "deploy:testnet": "node scripts/deploy.ts --network testnet",
+    "deploy:mainnet": "node scripts/deploy.ts --network mainnet",
+    "rehearse:deploy": "node scripts/rehearse-deploy.ts"
   },
   "devDependencies": {
     "near-api-js": "7.4.0",
