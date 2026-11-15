@@ -16,6 +16,7 @@ const LINE1_PREFIX: &str = "Link NEAR account ";
 const LINE1_MIDDLE: &str = " to bonuz ID @";
 const LINE2_PREFIX: &str = "Network: ";
 const LINE3_PREFIX: &str = "Expires: ";
+const LINE4_PREFIX: &str = "Wallet: ";
 
 /// Who checked that the signing key belongs to the NEAR account.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,13 +36,26 @@ impl CheckedBy {
     }
 }
 
-/// The three values a link message names.
+/// What a link message names. `bonuz_eoa` is the fourth line, `Wallet: 0x...`,
+/// added in 2.2.0: the user's creation wallet the NEAR account consents to.
+/// Registry 2.1.0 messages have three lines and no wallet.
 #[derive(Debug, PartialEq, Eq)]
 pub struct LinkMessage<'a> {
     pub account_id: &'a str,
     pub bonuz_id: &'a str,
     pub network: &'a str,
     pub expires: u64,
+    pub bonuz_eoa: Option<&'a str>,
+}
+
+impl LinkMessage<'_> {
+    /// The canonical text of these values (three or four lines).
+    pub fn to_text(&self) -> String {
+        match self.bonuz_eoa {
+            Some(eoa) => build_wallet_link_message(self.account_id, self.bonuz_id, self.network, self.expires, eoa),
+            None => build_link_message(self.account_id, self.bonuz_id, self.network, self.expires),
+        }
+    }
 }
 
 /// What a `link` call carries.
@@ -73,23 +87,32 @@ pub fn is_expired(expires: u64, now_ns: u64) -> bool {
     u128::from(now_ns) >= u128::from(expires) * 1_000_000_000
 }
 
-/// The text the app shows and signs. Inputs must already be canonical
-/// (lowercase); `check_link` refuses anything else.
+/// The three-line text registry 2.1.0 links with. Registry 2.2.0 refuses it
+/// in `link` because it names no wallet; use `build_wallet_link_message`.
+/// Inputs must already be canonical (lowercase); `check_link` refuses anything else.
 pub fn build_link_message(account_id: &str, bonuz_id: &str, network: &str, expires: u64) -> String {
     format!("{LINE1_PREFIX}{account_id}{LINE1_MIDDLE}{bonuz_id}\n{LINE2_PREFIX}{network}\n{LINE3_PREFIX}{expires}")
 }
 
-/// Parses the exact three-line message. Lines are separated by `\n` only;
-/// `\r`, any other control character, a trailing newline, extra lines or
-/// extra text are refused.
+/// The text the app shows and signs for registry 2.2.0: the three 2.1.0 lines
+/// plus `Wallet: <bonuz_eoa>`, the user's creation wallet in canonical form
+/// (`0x` and 40 lowercase hex characters, no checksum casing).
+pub fn build_wallet_link_message(account_id: &str, bonuz_id: &str, network: &str, expires: u64, bonuz_eoa: &str) -> String {
+    format!("{}\n{LINE4_PREFIX}{bonuz_eoa}", build_link_message(account_id, bonuz_id, network, expires))
+}
+
+/// Parses the exact message: three lines (2.1.0), or four with the wallet
+/// (2.2.0). Lines are separated by `\n` only; `\r`, any other control
+/// character, a trailing newline, extra lines or extra text are refused, and
+/// the wallet must be in canonical form.
 pub fn parse_link_message(message: &str) -> Result<LinkMessage<'_>, &'static str> {
     if message.chars().any(|c| c.is_control() && c != '\n') {
         return Err("message contains a control character");
     }
     let mut lines = message.split('\n');
-    let (l1, l2, l3) = match (lines.next(), lines.next(), lines.next(), lines.next()) {
-        (Some(a), Some(b), Some(c), None) => (a, b, c),
-        _ => return Err("message must have exactly three lines"),
+    let (l1, l2, l3, l4) = match (lines.next(), lines.next(), lines.next(), lines.next(), lines.next()) {
+        (Some(a), Some(b), Some(c), d, None) => (a, b, c, d),
+        _ => return Err("message must have three lines, or four with the wallet"),
     };
     let rest = l1.strip_prefix(LINE1_PREFIX).ok_or("line 1 must start with 'Link NEAR account '")?;
     let (account_id, bonuz_id) = rest
@@ -101,7 +124,17 @@ pub fn parse_link_message(message: &str) -> Result<LinkMessage<'_>, &'static str
     if account_id.is_empty() || account_id.contains(' ') || bonuz_id.is_empty() || bonuz_id.contains(' ') {
         return Err("line 1 must name one account and one handle");
     }
-    Ok(LinkMessage { account_id, bonuz_id, network, expires })
+    let bonuz_eoa = match l4 {
+        None => None,
+        Some(l4) => {
+            let eoa = l4
+                .strip_prefix(LINE4_PREFIX)
+                .filter(|eoa| check_bonuz_eoa(eoa).is_ok())
+                .ok_or("line 4 must read 'Wallet: 0x<40 lowercase hex>'")?;
+            Some(eoa)
+        }
+    };
+    Ok(LinkMessage { account_id, bonuz_id, network, expires, bonuz_eoa })
 }
 
 /// Plain ASCII digits, no sign, no leading zero, fits in u64.
@@ -181,16 +214,26 @@ pub fn nep413_preimage(message: &str, nonce: &[u8; 32], recipient: &str) -> Vec<
     out
 }
 
+/// What a message that passed `check_link` proves.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Checked<'a> {
+    pub checked_by: CheckedBy,
+    /// Unix seconds.
+    pub expires: u64,
+    /// The wallet the message names (line 4); None for a three-line 2.1.0 message.
+    pub bonuz_eoa: Option<&'a str>,
+}
+
 /// Checks everything about a link that does not need contract state: the
 /// signature, the message text against the call arguments, network, expiry
-/// and the key-to-account rule. Nonce reuse and the one-to-one rules are the
-/// contract's job.
-pub fn check_link(
-    input: &LinkInput,
+/// and the key-to-account rule. Nonce reuse, the one-to-one rules and whether
+/// a wallet line is required are the contract's job.
+pub fn check_link<'a>(
+    input: &LinkInput<'a>,
     ctx: &Context,
     sha256: impl Fn(&[u8]) -> [u8; 32],
     ed25519_verify: impl Fn(&[u8; 64], &[u8; 32], &[u8; 32]) -> bool,
-) -> Result<(CheckedBy, u64), &'static str> {
+) -> Result<Checked<'a>, &'static str> {
     check_bonuz_id(input.bonuz_id)?;
     if input.account_id.starts_with("0x") {
         return Err("Ethereum-style NEAR accounts (0x...) cannot be linked yet");
@@ -234,7 +277,7 @@ pub fn check_link(
         None if ctx.allow_registrar_checked => CheckedBy::Registrar,
         None => return Err("this registry only links implicit accounts"),
     };
-    Ok((checked_by, msg.expires))
+    Ok(Checked { checked_by, expires: msg.expires, bonuz_eoa: msg.bonuz_eoa })
 }
 
 /// 64 hex characters with at least one uppercase letter.
@@ -254,8 +297,34 @@ mod tests {
         let acc = "ab".repeat(32);
         assert_eq!(
             parse_link_message(&text),
-            Ok(LinkMessage { account_id: &acc, bonuz_id: "mende", network: "testnet", expires: 1_763_000_000 })
+            Ok(LinkMessage { account_id: &acc, bonuz_id: "mende", network: "testnet", expires: 1_763_000_000, bonuz_eoa: None })
         );
+        let eoa = format!("0x{}", "0a".repeat(20));
+        let text = build_wallet_link_message(&acc, "mende", "testnet", 1_763_000_000, &eoa);
+        let parsed = parse_link_message(&text).unwrap();
+        assert_eq!(parsed.bonuz_eoa, Some(eoa.as_str()));
+        assert_eq!(parsed.to_text(), text);
+    }
+
+    #[test]
+    fn wallet_line_is_canonical_only() {
+        let eoa = format!("0x{}", "ab".repeat(20));
+        let good = build_wallet_link_message("alice.testnet", "mende", "testnet", 1_763_000_000, &eoa);
+        assert!(parse_link_message(&good).is_ok());
+        let bad = [
+            good.replace("0xab", "0xAB"),
+            good.replace("Wallet: 0x", "Wallet: 0X"),
+            good.replace("Wallet: ", "Wallet:"),
+            good.replace("Wallet: ", "wallet: "),
+            good.replace(&eoa, &eoa[..41]),
+            format!("{good}a"),
+            format!("{good}\n"),
+            format!("{good}\nWallet: {eoa}"),
+            good.replace("\nWallet", "\n Wallet"),
+        ];
+        for m in bad {
+            assert!(parse_link_message(&m).is_err(), "accepted: {m:?}");
+        }
     }
 
     #[test]

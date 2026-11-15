@@ -196,7 +196,7 @@ await send('set_handle_rename_a', reg, ids.contract, [call('set_handle', { bonuz
 expect((await v('bonuz_of', { account_id: implicitA.accountId })) === 'rehearsal_a_renamed', 'rename keeps the link (bonuz_of follows the new handle)');
 expect((await v('account_of', { bonuz_id: 'rehearsal_a' })) === null, 'the old handle resolves to nothing');
 await send('set_handle_on_legacy_handle_refused', reg, ids.contract, [call('set_handle', { bonuz_eoa: eoa('z'), bonuz_id: 'rehearsal_b' })], '2.1.0 link still names');
-const implicitC = signLink(randomBytes(32), { bonuzId: 'rehearsal_c', network: 'testnet', expires: (await now()) + 480, recipient: ids.contract, nonce: randomBytes(32) });
+const implicitC = signLink(randomBytes(32), { bonuzId: 'rehearsal_c', network: 'testnet', expires: (await now()) + 480, recipient: ids.contract, nonce: randomBytes(32), bonuzEoa: eoa('c') });
 const linkC = await send('v2_2_link_implicit_c_with_wallet', reg, ids.contract, [call('link', linkArgs(implicitC, eoa('c')))]);
 measured.v2_2_link_implicit_c_with_wallet = `${(burnt(linkC) / 1e12).toFixed(2)} Tgas`;
 expect((await v('account_of_eoa', { bonuz_eoa: eoa('c') })) === implicitC.accountId, 'a 2.2.0 implicit link is keyed to the wallet');

@@ -72,6 +72,7 @@ deposit, reads it back, and shows two refusals. You see, among others:
         | Link NEAR account <64 hex> to bonuz ID @demo_user
         | Network: testnet
         | Expires: <unix seconds>
+        | Wallet: 0x<40 hex>
 [5] The registrar submits link() with 0 deposit; the contract re-checks the signature
     ok  gas burnt 2.64 Tgas; the contract paid 490 bytes of storage
 [6] Read it back, like any app or agent can
@@ -121,6 +122,10 @@ Expires: <unix seconds>
 ```
 
 NEP-413 `recipient` is the registry contract id and the `nonce` is the backend's 32-byte challenge.
+
+From registry 2.2.0 the message has a fourth line, `Wallet: <0x + 40 lowercase hex>`, the
+user's creation wallet, and the three-line form above is refused; 2.1.0 refuses the four-line
+form. See [`docs/registry-2.2.0.md`](docs/registry-2.2.0.md).
 
 ### The contract (`contracts/registry`, Rust, near-sdk 5.30.1)
 

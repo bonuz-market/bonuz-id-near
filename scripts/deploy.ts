@@ -409,6 +409,9 @@ if (args.has('--demo-links')) {
   const block = await provider.viewBlock({ finality: 'final' });
   const expires = Math.floor(Number(block.header.timestamp_nanosec) / 1e9) + 480;
   const msgNetwork = network === 'sandbox' ? 'testnet' : network;
+  // 2.2.0 links need the four-line message naming the wallet; 2.1.0 refuses it.
+  const liveNow = (await viewRegistry<{ version: string }>('status', {}, { contractId: P.contract, rpcUrl: P.rpc, finality: 'optimistic' })).version;
+  const walletFor = (handle: string) => (liveNow.startsWith('2.1.') ? {} : { bonuzEoa: demoEoa(handle) });
   const send = async (step: string, input: ReturnType<typeof signLink>) => {
     const before = (await provider.viewAccount({ accountId: P.contract })).storage_usage;
     const res = await registrar.callFunctionRaw({
@@ -433,11 +436,11 @@ if (args.has('--demo-links')) {
   };
   await send(
     'demo_link_unfunded_app_wallet_to_bonuz_demo',
-    signLink(randomBytes(32), { bonuzId: 'bonuz_demo', network: msgNetwork as 'testnet', expires, recipient: P.contract, nonce: randomBytes(32) }),
+    signLink(randomBytes(32), { bonuzId: 'bonuz_demo', network: msgNetwork as 'testnet', expires, recipient: P.contract, nonce: randomBytes(32), ...walletFor('bonuz_demo') }),
   );
   if (P.allowRegistrarChecked) {
     const ownerKey = KeyPair.fromString(loadKey(P.owner));
-    const message = buildLinkMessage({ accountId: P.owner, bonuzId: 'bonuz', network: msgNetwork, expires });
+    const message = buildLinkMessage({ accountId: P.owner, bonuzId: 'bonuz', network: msgNetwork, expires, ...walletFor('bonuz') });
     const nonce = randomBytes(32);
     const seed = base58.decode(loadKey(P.owner).slice('ed25519:'.length)).slice(0, 32);
     await send('demo_link_owner_to_bonuz', {

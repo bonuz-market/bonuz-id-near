@@ -46,6 +46,27 @@ fn signed(w: &Wallet, handle: &str, nonce: u8, expires: u64) -> Call {
     signed_with(w, &w.account(), handle, "testnet", nonce, expires, CONTRACT)
 }
 
+/// Signed for an explicit creation wallet instead of `eoa(handle)`.
+fn signed_for(w: &Wallet, handle: &str, wallet: &str, nonce: u8, expires: u64) -> Call {
+    let mut c = signed(w, handle, nonce, expires);
+    c.message = build_wallet_link_message(&w.account(), handle, "testnet", expires, wallet);
+    c.signature = w.sign(&c.message, c.nonce, CONTRACT);
+    c
+}
+
+/// `link` with an explicit `bonuz_eoa` argument (or none).
+fn link_as(r: &mut Registry, c: &Call, bonuz_eoa: Option<String>) -> U64 {
+    r.link(
+        c.account_id.parse().unwrap(),
+        c.bonuz_id.clone(),
+        c.public_key.clone(),
+        Base64VecU8(c.nonce.to_vec()),
+        Base64VecU8(c.signature.clone()),
+        c.message.clone(),
+        bonuz_eoa,
+    )
+}
+
 fn signed_with(
     w: &Wallet,
     account: &str,
@@ -55,7 +76,7 @@ fn signed_with(
     expires: u64,
     recipient: &str,
 ) -> Call {
-    let message = build_link_message(account, handle, network, expires);
+    let message = build_wallet_link_message(account, handle, network, expires, &eoa(handle));
     let nonce = [nonce; 32];
     Call {
         account_id: account.into(),
@@ -532,7 +553,15 @@ fn owner_methods_need_the_owner_and_one_yocto() {
 
 #[test]
 fn parser_accepts_only_the_canonical_text() {
-    let base = build_link_message(&Wallet::new(1).account(), "mende", "testnet", T0 + 480);
+    let three = build_link_message(&Wallet::new(1).account(), "mende", "testnet", T0 + 480);
+    let four = build_wallet_link_message(&Wallet::new(1).account(), "mende", "testnet", T0 + 480, &eoa("mende"));
+    parser_property(&three);
+    parser_property(&four);
+}
+
+fn parser_property(base: &str) {
+    let base = base.to_string();
+    let line_count = base.split('\n').count();
     let alphabet: Vec<char> = " \n\r\t@.-_:aAzZ09\u{00A0}\u{200B}\u{FF20}\u{0430}\u{2028}".chars().collect();
     let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
     let mut rand = |n: usize| {
@@ -555,7 +584,7 @@ fn parser_accepts_only_the_canonical_text() {
                 _ => {
                     let lines: Vec<&str> = base.split('\n').collect();
                     let mut l = lines.clone();
-                    l.swap(rand(3), rand(3));
+                    l.swap(rand(line_count), rand(line_count));
                     chars = l.join("\n").chars().collect();
                 }
             }
@@ -566,7 +595,7 @@ fn parser_accepts_only_the_canonical_text() {
         }
         if let Ok(p) = proof::parse_link_message(&m) {
             // Whatever is accepted must rebuild to itself: no hidden extra text.
-            assert_eq!(build_link_message(p.account_id, p.bonuz_id, p.network, p.expires), m);
+            assert_eq!(p.to_text(), m);
             // And it never parses to the original's values.
             let o = proof::parse_link_message(&base).unwrap();
             assert_ne!(p, o, "mutation parsed to the original values: {m:?}");
@@ -605,7 +634,7 @@ fn steady_traffic(random_seeds: bool) -> u32 {
         let mut nonce = [9u8; 32];
         nonce[..4].copy_from_slice(&i.to_le_bytes());
         let handle = format!("user{i}");
-        let message = build_link_message(&w.account(), &handle, "mainnet", now + 300);
+        let message = build_wallet_link_message(&w.account(), &handle, "mainnet", now + 300, &eoa(&handle));
         link(&mut r, &Call {
             account_id: w.account(),
             bonuz_id: handle,
@@ -962,29 +991,96 @@ fn a_rename_keeps_the_link_and_a_new_holder_of_the_old_handle_inherits_nothing()
 }
 
 #[test]
-fn link_without_a_wallet_needs_the_handle_to_be_a_label() {
+fn link_takes_the_wallet_from_the_signed_message() {
     let mut r = registry("testnet", true);
     let w = Wallet::new(1);
-    let c = signed(&w, "mende", 1, T0 + 480);
-    let call = |r: &mut Registry, c: &Call| {
-        r.link(
-            c.account_id.parse().unwrap(),
-            c.bonuz_id.clone(),
-            c.public_key.clone(),
-            Base64VecU8(c.nonce.to_vec()),
-            Base64VecU8(c.signature.clone()),
-            c.message.clone(),
-            None,
-        )
-    };
+    // No bonuz_eoa argument: the signed wallet line decides.
     ctx(REGISTRAR, T0);
-    assert!(panics(|| {
-        call(&mut r, &c);
-    })
-    .contains("pass bonuz_eoa"));
-    r.set_handle(eoa("mende"), Some("mende".into()));
-    call(&mut r, &c);
+    link_as(&mut r, &signed(&w, "mende", 1, T0 + 480), None);
     assert_eq!(r.account_of_eoa(eoa("mende")), Some(acc(&w.account())));
+    // The three-line 2.1.0 message names no wallet: refused, whatever the argument says.
+    let mut old = signed(&Wallet::new(2), "olls", 2, T0 + 480);
+    old.message = build_link_message(&old.account_id, "olls", "testnet", T0 + 480);
+    old.signature = Wallet::new(2).sign(&old.message, old.nonce, CONTRACT);
+    ctx(REGISTRAR, T0 + 1);
+    for arg in [None, Some(eoa("olls"))] {
+        assert!(panics(|| {
+            link_as(&mut r, &old, arg.clone());
+        })
+        .contains("must name the bonuz wallet"));
+    }
+    assert_eq!(r.status().stored_nonces, 1, "a refused link stores no nonce");
+}
+
+#[test]
+fn an_explicit_bonuz_eoa_cannot_take_an_unlinked_wallets_label() {
+    // The 2.2.0 review finding: with the handle-only message, the registrar
+    // could pass any bonuz_eoa B and the link landed on B, moving the label off
+    // an unlinked wallet U on the way. B never consented.
+    let mut r = registry("testnet", true);
+    let w = Wallet::new(1);
+    let u = "0x00000000000000000000000000000000000000aa".to_string();
+    let b = "0x00000000000000000000000000000000000000bb".to_string();
+    ctx(REGISTRAR, T0);
+    r.set_handle(u.clone(), Some("mende".into())); // U holds @mende, no live link
+    // The account signed for U; the registrar names B.
+    let c = signed_for(&w, "mende", &u, 1, T0 + 480);
+    ctx(REGISTRAR, T0 + 1);
+    assert!(panics(|| {
+        link_as(&mut r, &c, Some(b.clone()));
+    })
+    .contains("names a different bonuz wallet"));
+    // The account signed for B, but @mende labels U: refused, no silent move.
+    let c = signed_for(&w, "mende", &b, 2, T0 + 480);
+    ctx(REGISTRAR, T0 + 2);
+    for arg in [None, Some(b.clone())] {
+        assert!(panics(|| {
+            link_as(&mut r, &c, arg.clone());
+        })
+        .contains("labels another bonuz wallet"));
+    }
+    assert_eq!(r.eoa_of("mende".into()), Some(u.clone()), "the label did not move");
+    assert_eq!(r.account_of_eoa(b.clone()), None);
+    assert_eq!(r.account_of_eoa(u.clone()), None);
+    assert_eq!(r.status().links.0, 0);
+    // Signed for U, the wallet @mende labels: links U, the one that consented.
+    let c = signed_for(&w, "mende", &u, 3, T0 + 480);
+    ctx(REGISTRAR, T0 + 3);
+    link_as(&mut r, &c, Some(u.clone()));
+    assert_eq!(r.account_of_eoa(u), Some(acc(&w.account())));
+}
+
+#[test]
+fn a_handle_retake_in_flight_never_lands_on_the_new_holder() {
+    // The account signs for @mende while its wallet holds @mende. Before the
+    // call lands (inside the 10-minute window) bonuz renames that user and a
+    // new user V takes @mende. 2.2.0 before the fix, called without bonuz_eoa,
+    // looked the wallet up by handle and linked the account to V.
+    let mut r = registry("testnet", true);
+    let w = Wallet::new(1);
+    let user = eoa("mende");
+    let v = "0x00000000000000000000000000000000000000cc".to_string();
+    ctx(REGISTRAR, T0);
+    r.set_handle(user.clone(), Some("mende".into()));
+    let c = signed(&w, "mende", 1, T0 + 480); // names wallet eoa("mende")
+    ctx(REGISTRAR, T0 + 60);
+    r.set_handle(user.clone(), Some("matthias".into()));
+    r.set_handle(v.clone(), Some("mende".into()));
+    ctx(REGISTRAR, T0 + 120);
+    for arg in [None, Some(user.clone()), Some(v.clone())] {
+        assert!(panics(|| {
+            link_as(&mut r, &c, arg.clone());
+        })
+        .contains(if arg.as_ref() == Some(&v) { "names a different bonuz wallet" } else { "labels another bonuz wallet" }));
+    }
+    assert_eq!(r.account_of_eoa(v.clone()), None, "V never consented");
+    assert_eq!(r.account_of_eoa(user.clone()), None);
+    assert_eq!(r.eoa_of("mende".into()), Some(v), "the retake stands");
+    assert_eq!(r.handle_of(user.clone()), Some("matthias".into()));
+    // A fresh message for the user's current handle links the right wallet.
+    ctx(REGISTRAR, T0 + 130);
+    link_as(&mut r, &signed_for(&w, "matthias", &user, 2, T0 + 600), None);
+    assert_eq!(r.account_of_eoa(user), Some(acc(&w.account())));
 }
 
 #[test]
@@ -1190,20 +1286,11 @@ fn a_wallet_with_an_unadopted_2_1_link_cannot_get_a_second_account() {
     // The user behind 2.1.0 "mende" (wallet eoa("mende")) tries a second account.
     let c = Wallet::new(3);
     ctx(REGISTRAR, T0 + 1);
-    let mut call = signed(&c, "fresh", 3, T0 + 480);
-    call.signature = c.sign(&call.message, call.nonce, CONTRACT);
-    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        r.link(
-            call.account_id.parse().unwrap(),
-            call.bonuz_id.clone(),
-            call.public_key.clone(),
-            Base64VecU8(call.nonce.to_vec()),
-            Base64VecU8(call.signature.clone()),
-            call.message.clone(),
-            Some(eoa("mende")),
-        );
-    }));
-    assert!(err.is_err());
+    let call = signed_for(&c, "fresh", &eoa("mende"), 3, T0 + 480);
+    assert!(panics(|| {
+        link_as(&mut r, &call, Some(eoa("mende")));
+    })
+    .contains("not all adopted yet"));
     ctx(REGISTRAR, T0 + 1);
     assert!(panics(|| {
         r.propose_link(acc(ALICE), eoa("mende"), "fresh".into());
@@ -1233,21 +1320,12 @@ fn link_and_propose_never_move_a_handle_from_another_linked_wallet() {
     ctx(REGISTRAR, T0);
     link(&mut r, &signed(&a, "mende", 1, T0 + 480)); // eoa("mende") holds @mende, linked
     // Another wallet tries to take @mende through link: refused, as 2.1.0 did.
-    let mut call = signed(&b, "mende", 2, T0 + 480);
-    call.signature = b.sign(&call.message, call.nonce, CONTRACT);
     let other_wallet = "0x00000000000000000000000000000000000000bb".to_string();
-    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        r.link(
-            call.account_id.parse().unwrap(),
-            call.bonuz_id.clone(),
-            call.public_key.clone(),
-            Base64VecU8(call.nonce.to_vec()),
-            Base64VecU8(call.signature.clone()),
-            call.message.clone(),
-            Some(other_wallet.clone()),
-        );
-    }));
-    assert!(res.is_err());
+    let call = signed_for(&b, "mende", &other_wallet, 2, T0 + 480);
+    assert!(panics(|| {
+        link_as(&mut r, &call, Some(other_wallet.clone()));
+    })
+    .contains("unlink it first"));
     assert_eq!(r.eoa_of("mende".into()), Some(eoa("mende")), "the label did not move");
     ctx(REGISTRAR, T0 + 1);
     assert!(panics(|| {

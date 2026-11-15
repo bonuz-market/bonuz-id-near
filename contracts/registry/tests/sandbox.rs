@@ -7,7 +7,7 @@
 //! 2.2.0: a named account confirms a pending claim itself (`accept_link`), and
 //! a live 2.1.0 registry upgrades in one transaction (deploy + migrate).
 
-use bonuz_id_registry::proof::{build_link_message, nep413_preimage};
+use bonuz_id_registry::proof::{build_link_message, build_wallet_link_message, nep413_preimage};
 use ed25519_dalek::{Signer, SigningKey};
 use near_workspaces::network::Sandbox;
 use near_workspaces::types::{AccessKey, KeyType, NearToken, SecretKey};
@@ -105,15 +105,20 @@ impl Wallet {
     fn public_key(&self) -> String {
         format!("ed25519:{}", bs58::encode(self.0.verifying_key().to_bytes()).into_string())
     }
-    /// The args for `link`, signed like the app signs.
+    /// The args for 2.2.0 `link`, signed like the app signs: the message names
+    /// the wallet (line 4) and the call repeats it in `bonuz_eoa`.
     fn link_args(&self, handle: &str, recipient: &str, expires: u64) -> Value {
-        let mut args = self.link_args_v2_1(handle, recipient, expires);
+        let message = build_wallet_link_message(&self.account(), handle, "testnet", expires, &eoa(handle));
+        let mut args = self.signed_args(handle, recipient, message);
         args["bonuz_eoa"] = json!(eoa(handle));
         args
     }
-    /// The same without `bonuz_eoa`, as the 2.1.0 backend sends it.
+    /// The 2.1.0 form: three-line message, no `bonuz_eoa`.
     fn link_args_v2_1(&self, handle: &str, recipient: &str, expires: u64) -> Value {
         let message = build_link_message(&self.account(), handle, "testnet", expires);
+        self.signed_args(handle, recipient, message)
+    }
+    fn signed_args(&self, handle: &str, recipient: &str, message: String) -> Value {
         let nonce: [u8; 32] = rand::random();
         let hash = Sha256::digest(nep413_preimage(&message, &nonce, recipient));
         let b64 = |b: &[u8]| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b);
@@ -376,12 +381,11 @@ async fn upgrade_from_2_1_with_migrate_keeps_every_link() -> anyhow::Result<()> 
     assert_eq!(status["version"], "2.1.0");
 
     let now = sandbox.view_block().await?.timestamp() / 1_000_000_000;
-    let (a, b) = (Wallet::fresh(), Wallet::fresh());
+    let (a, b, c) = (Wallet::fresh(), Wallet::fresh(), Wallet::fresh());
     // b's call already carries bonuz_eoa, as an updated backend sends it: 2.1.0 must ignore it.
-    for args in [
-        a.link_args_v2_1("mende", contract.id().as_str(), now + 480),
-        b.link_args("olls", contract.id().as_str(), now + 480),
-    ] {
+    let mut b_args = b.link_args_v2_1("olls", contract.id().as_str(), now + 480);
+    b_args["bonuz_eoa"] = json!(eoa("olls"));
+    for args in [a.link_args_v2_1("mende", contract.id().as_str(), now + 480), b_args] {
         registrar
             .call(contract.id(), "link")
             .args_json(args)
@@ -389,6 +393,10 @@ async fn upgrade_from_2_1_with_migrate_keeps_every_link() -> anyhow::Result<()> 
             .await?
             .into_result()?;
     }
+    // 2.1.0 refuses the four-line 2.2.0 message: the backend must switch formats
+    // with the upgrade (it reads status().version).
+    let res = registrar.call(contract.id(), "link").args_json(c.link_args("fresh", contract.id().as_str(), now + 480)).transact().await?;
+    assert!(format!("{:?}", res.into_result().unwrap_err()).contains("exactly three lines"));
 
     let res = contract
         .as_account()
@@ -431,6 +439,20 @@ async fn upgrade_from_2_1_with_migrate_keeps_every_link() -> anyhow::Result<()> 
     registrar.call(contract.id(), "unlink_by_registrar").args_json(json!({ "account_id": b.account() })).transact().await?.into_result()?;
     let status: Value = contract.view("status").await?.json()?;
     assert_eq!((status["links"].as_str(), status["legacy_links"].as_str()), (Some("1"), Some("0")));
+
+    // From 2.2.0 the three-line message is refused, the four-line one links the signed wallet.
+    let now = sandbox.view_block().await?.timestamp() / 1_000_000_000;
+    let mut old_form = c.link_args_v2_1("fresh", contract.id().as_str(), now + 480);
+    old_form["bonuz_eoa"] = json!(eoa("fresh"));
+    let res = registrar.call(contract.id(), "link").args_json(old_form).transact().await?;
+    assert!(format!("{:?}", res.into_result().unwrap_err()).contains("must name the bonuz wallet"));
+    registrar
+        .call(contract.id(), "link")
+        .args_json(c.link_args("fresh", contract.id().as_str(), now + 480))
+        .transact()
+        .await?
+        .into_result()?;
+    assert_eq!(view(&contract, "account_of_eoa", json!({ "bonuz_eoa": eoa("fresh") })).await?, json!(c.account()));
     Ok(())
 }
 

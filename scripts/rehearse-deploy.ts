@@ -48,11 +48,12 @@ try {
   const fc = JSON.parse(readFileSync(join(creds, 'sandbox', 'registrar-fc', 'registrar.sandbox.json'), 'utf8'));
   const registrar = new Account('registrar.sandbox', provider, new KeyPairSigner(KeyPair.fromString(fc.private_key)));
   const now = Math.floor(Number((await provider.viewBlock({ finality: 'final' })).header.timestamp_nanosec) / 1e9);
-  const input = signLink(randomBytes(32), { bonuzId: 'mende', network: 'testnet', expires: now + 480, recipient: 'id.sandbox', nonce: randomBytes(32) });
+  const wallet = `0x${'ab'.repeat(20)}`;
+  const input = signLink(randomBytes(32), { bonuzId: 'mende', network: 'testnet', expires: now + 480, recipient: 'id.sandbox', nonce: randomBytes(32), bonuzEoa: wallet });
   await registrar.callFunction({
     contractId: 'id.sandbox',
     methodName: 'link',
-    args: { account_id: input.accountId, bonuz_id: input.bonuzId, public_key: input.publicKey, nonce: input.nonce, signature: input.signature, message: input.message, bonuz_eoa: `0x${'ab'.repeat(20)}` },
+    args: { account_id: input.accountId, bonuz_id: input.bonuzId, public_key: input.publicKey, nonce: input.nonce, signature: input.signature, message: input.message, bonuz_eoa: wallet },
     gas: 30_000_000_000_000n,
   });
   expect((await bonuzOf(input.accountId, views)) === 'mende', 'registrar function-call key links an unfunded app wallet');

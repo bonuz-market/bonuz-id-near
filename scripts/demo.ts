@@ -101,6 +101,7 @@ try {
     expires: nowS + 480,
     recipient: registry.accountId,
     nonce: randomBytes(32),
+    bonuzEoa: demoEoa('demo_user'),
   });
   const exists = await provider.viewAccount({ accountId: input.accountId }).then(
     () => true,
@@ -161,6 +162,7 @@ try {
     expires: nowS + 480,
     recipient: registry.accountId,
     nonce: randomBytes(32),
+    bonuzEoa: demoEoa('demo_user'),
   });
   try {
     await registrar.callFunction({ contractId: registry.accountId, methodName: 'link', args: linkArgs(other) });

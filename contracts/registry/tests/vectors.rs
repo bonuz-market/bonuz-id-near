@@ -48,8 +48,9 @@ fn shared_vectors() {
         );
         let e = &c["expect"];
         if e["ok"].as_bool().unwrap() {
-            let (checked_by, _) = got.unwrap_or_else(|err| panic!("{name}: expected ok, got {err:?}"));
-            assert_eq!(checked_by.as_str(), e["checked_by"].as_str().unwrap(), "{name}");
+            let checked = got.unwrap_or_else(|err| panic!("{name}: expected ok, got {err:?}"));
+            assert_eq!(checked.checked_by.as_str(), e["checked_by"].as_str().unwrap(), "{name}");
+            assert_eq!(checked.bonuz_eoa, e["bonuz_eoa"].as_str(), "{name}");
         } else {
             assert_eq!(got.map(|_| ()), Err(e["error"].as_str().unwrap()), "{name}");
         }

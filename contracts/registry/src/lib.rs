@@ -31,8 +31,8 @@ use near_sdk::{
 };
 
 pub use proof::{
-    build_link_message, check_bonuz_eoa, check_bonuz_id, check_link, is_expired, CheckedBy, Context,
-    LinkInput,
+    build_link_message, build_wallet_link_message, check_bonuz_eoa, check_bonuz_id, check_link, is_expired,
+    Checked, CheckedBy, Context, LinkInput,
 };
 
 /// Daily cap on `unlink_by_registrar` when no raised cap is active.
@@ -51,6 +51,9 @@ const NS_PER_DAY: u64 = 86_400 * 1_000_000_000;
 
 const ERR_TAKEN: &str = "this bonuz ID is linked to another NEAR account; unlink it first";
 const ERR_LEGACY: &str = "a 2.1.0 link still names this bonuz ID; adopt_legacy_link or unlink it first";
+const ERR_NO_WALLET: &str =
+    "the signed message must name the bonuz wallet (line 4 'Wallet: 0x...'); 2.2.0 refuses the three-line 2.1.0 message";
+const ERR_LABEL: &str = "this bonuz ID labels another bonuz wallet; set_handle first";
 const ERR_BACKFILL: &str =
     "2.1.0 links are not all adopted yet; adopt_legacy_link (or unlink) them before new links or proposals";
 
@@ -318,21 +321,25 @@ impl Registry {
         }
     }
 
-    /// Registrar only. Links `account_id` to the bonuz user `bonuz_eoa` with a
-    /// NEP-413 signature (recipient = this contract, no callback URL) over `message`:
+    /// Registrar only. Links `account_id` to the bonuz user whose creation
+    /// wallet the message names, with a NEP-413 signature (recipient = this
+    /// contract, no callback URL) over `message`:
     ///
     /// ```text
     /// Link NEAR account <account_id> to bonuz ID @<bonuz_id>
     /// Network: <testnet|mainnet>
     /// Expires: <unix seconds>
+    /// Wallet: <bonuz_eoa, 0x + 40 lowercase hex>
     /// ```
     ///
-    /// `bonuz_id` becomes the wallet's handle label. Without `bonuz_eoa` the
-    /// handle must already be a label (`set_handle`), else the call fails.
-    /// If the account was linked to another user, that link is replaced (the
-    /// account's new signature is the consent). If the user is linked to a
-    /// different account, the call fails: the registrar must
-    /// `unlink_by_registrar` that account first. Returns the block height.
+    /// The link goes to the signed wallet and nowhere else. The three-line
+    /// 2.1.0 message (no wallet line) is refused. `bonuz_eoa` is optional and,
+    /// when given, must equal the signed wallet. `bonuz_id` becomes the
+    /// wallet's handle label; a handle that labels another wallet is refused
+    /// (`set_handle` first). If the account was linked to another user, that
+    /// link is replaced (the account's new signature is the consent). If the
+    /// user is linked to a different account, the call fails: the registrar
+    /// must `unlink_by_registrar` that account first. Returns the block height.
     #[allow(clippy::too_many_arguments)]
     pub fn link(
         &mut self,
@@ -366,26 +373,24 @@ impl Registry {
         };
         // Expiry is checked inside check_link, before the nonce lookup below, so
         // a pruned nonce can only belong to a message that is refused as expired.
-        let (checked_by, expires) = check_link(
+        let checked = check_link(
             &input,
             &ctx,
             |data| env::sha256_array(data),
             |sig, hash, key| env::ed25519_verify(sig, hash, key),
         )
         .unwrap_or_else(|e| env::panic_str(e));
+        let (checked_by, expires) = (checked.checked_by, checked.expires);
+        // The account consents to one wallet, the one it signed. Never the
+        // wallet the handle happens to label, never one the registrar names.
+        let eoa = checked.bonuz_eoa.unwrap_or_else(|| env::panic_str(ERR_NO_WALLET)).to_owned();
 
         // Every check runs before the first write.
         let nonce: [u8; 32] = nonce.0.try_into().unwrap_or_else(|_| env::abort());
         require!(!self.nonces.contains_key(&nonce), "this nonce was already used");
-        let eoa = match bonuz_eoa {
-            Some(eoa) => {
-                check_bonuz_eoa(&eoa).unwrap_or_else(|e| env::panic_str(e));
-                eoa
-            }
-            None => self.eoa_of_handle.get(&bonuz_id).cloned().unwrap_or_else(|| {
-                env::panic_str("pass bonuz_eoa: from 2.2.0 a link is keyed to the user's creation wallet")
-            }),
-        };
+        if let Some(arg) = &bonuz_eoa {
+            require!(arg == &eoa, "the signed message names a different bonuz wallet");
+        }
         // While 2.1.0 links wait for adoption, a wallet's old link is invisible here
         // (it is keyed by handle), so a second live account could slip in.
         require!(self.legacy_links == 0, ERR_BACKFILL);
@@ -393,6 +398,11 @@ impl Registry {
             require!(holder == &account_id, ERR_TAKEN);
         }
         self.assert_handle_free_for(&bonuz_id, &eoa);
+        // Stricter than propose_link: the message may be up to 10 minutes old, so
+        // a label set since then (a rename or a retake by another wallet) wins.
+        if let Some(other) = self.eoa_of_handle.get(&bonuz_id) {
+            require!(other == &eoa, ERR_LABEL);
+        }
 
         self.nonces.insert(nonce, expires);
         self.write_link(account_id, &eoa, Some(&bonuz_id), Some(public_key), checked_by.as_str());
@@ -431,7 +441,7 @@ impl Registry {
         }
         if let Some(other) = self.proposal_of_eoa.get(&bonuz_eoa).cloned() {
             if other != account_id {
-                let expired = self.proposals.get(&other).map_or(true, |p| is_expired(p.expires, now));
+                let expired = self.proposals.get(&other).is_none_or(|p| is_expired(p.expires, now));
                 require!(expired, "this bonuz ID already has a pending link proposal for another NEAR account; cancel it first");
                 self.close_proposal(&other, "expired");
             }
