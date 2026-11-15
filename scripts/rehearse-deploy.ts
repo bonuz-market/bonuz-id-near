@@ -72,15 +72,26 @@ try {
   expect((await provider.viewAccount({ accountId: 'id.sandbox' })).code_hash === codeBefore, 'code unchanged by rerun');
 
   // 4. Code upgrade keeps state
-  const up = deploy('--upgrade-code');
+  const bare = deploy('--upgrade-code');
+  expect(bare.status === 1 && bare.stderr.includes('needs --new-registrar-key'), '--upgrade-code alone is refused');
+  const up = deploy('--upgrade-code', '--new-registrar-key');
   expect(up.status === 0 && up.stdout.includes('upgrade_code_keep_state'), 'upgrade runs');
   expect((await bonuzOf(input.accountId, views)) === 'mende', 'link survives the upgrade');
 
   // 5. Refusals
-  const dangerous = spawnSync('node', ['scripts/deploy.ts', '--network', 'mainnet', '--yes-mainnet', '--demo-links'], { env, encoding: 'utf8' });
-  expect(dangerous.status === 1 && dangerous.stderr.includes('not allowed on mainnet'), 'mainnet refuses --demo-links before any read');
-  const noYes = spawnSync('node', ['scripts/deploy.ts', '--network', 'mainnet'], { env, encoding: 'utf8' });
-  expect(noYes.status === 1 && noYes.stderr.includes('--yes-mainnet'), 'mainnet refuses without --yes-mainnet');
+  // The refusals must come before any network call: NEAR_RPC points nowhere, and the
+  // preload throws on any fetch, so a refusal that came after a read would show that error.
+  const offline = { ...env, NEAR_RPC: 'http://127.0.0.1:9', NODE_OPTIONS: `--import ${new URL('./no-network.mjs', import.meta.url).pathname}` };
+  const offlineRun = (...flags: string[]) => spawnSync('node', ['scripts/deploy.ts', '--network', 'mainnet', ...flags], { env: offline, encoding: 'utf8' });
+  const noNet = (r: ReturnType<typeof spawnSync>) => !String(r.stderr).includes('NETWORK CALL');
+  const dangerous = offlineRun('--yes-mainnet', '--demo-links');
+  expect(dangerous.status === 1 && String(dangerous.stderr).includes('not allowed on mainnet') && noNet(dangerous), 'mainnet refuses --demo-links before any network call');
+  const noYes = offlineRun();
+  expect(noYes.status === 1 && String(noYes.stderr).includes('--yes-mainnet') && noNet(noYes), 'mainnet refuses without --yes-mainnet, before any network call');
+  const bareMainnet = offlineRun('--yes-mainnet', '--upgrade-code');
+  expect(bareMainnet.status === 1 && String(bareMainnet.stderr).includes('needs --new-registrar-key') && noNet(bareMainnet), 'mainnet --upgrade-code without --new-registrar-key is refused before any network call');
+  const probe = spawnSync('node', ['-e', "fetch('http://127.0.0.1:9').catch(()=>{})"], { env: offline, encoding: 'utf8' });
+  expect(String(probe.stderr).includes('NETWORK CALL'), 'the no-network guard itself catches a fetch');
   const keyFiles = execFileSync('find', [creds, '-name', '*.json']).toString().trim().split('\n').length;
   expect(keyFiles >= 4, `keys saved for owner, contract, registrar and function-call key (${keyFiles} files)`);
   const out = `${first.stdout}${first.stderr}${rerun.stdout}${up.stdout}`;
@@ -164,6 +175,17 @@ try {
       args: { account_id: l3.accountId, bonuz_id: l3.bonuzId, public_key: l3.publicKey, nonce: l3.nonce, signature: l3.signature, message: l3.message },
       gas: 30_000_000_000_000n,
     });
+    // An upgrade that would leave the registry under its reserve is refused before sending.
+    const id3 = new Account('id.sandbox', p3, new KeyPairSigner(KeyPair.fromString(JSON.parse(readFileSync(join(creds3, 'sandbox', 'id.sandbox.json'), 'utf8')).private_key)));
+    const root3 = new Account(DEFAULT_ACCOUNT_ID, p3, new KeyPairSigner(KeyPair.fromString(DEFAULT_PRIVATE_KEY)));
+    await id3.transfer({ receiverId: DEFAULT_ACCOUNT_ID, amount: 35n * 10n ** 23n });
+    const codeBefore3 = (await p3.viewAccount({ accountId: 'id.sandbox' })).code_hash;
+    const poor = run3(null, '--upgrade-code', '--new-registrar-key');
+    expect(
+      poor.status === 1 && poor.stderr.includes('under its 1 NEAR reserve') && (await p3.viewAccount({ accountId: 'id.sandbox' })).code_hash === codeBefore3,
+      'an upgrade that would leave the registry under its reserve is refused, nothing sent',
+    );
+    await root3.transfer({ receiverId: 'id.sandbox', amount: 35n * 10n ** 23n });
     const up3 = run3(null, '--upgrade-code', '--new-registrar-key');
     if (up3.status) console.log('--- upgrade run', up3.stdout, up3.stderr);
     expect(up3.status === 0 && up3.stdout.includes('upgrade_code_and_migrate_2_1_to_2_2'), '2.1.0 -> 2.2.0 goes out as deploy + migrate in one transaction');
@@ -172,7 +194,7 @@ try {
     expect(s22.version === '2.2.0' && s22.links === '1' && s22.legacy_links === '1', 'status: 2.2.0, the 2.1.0 link kept and counted as legacy');
     expect((await bonuzOf(l3.accountId, v3)) === 'mende', 'the 2.1.0 link still reads after the migration');
     expect(existsSync(join(creds3, 'sandbox', 'registrar-fc', 'registrar.sandbox.1.json')), 'the old registrar key file is kept as .1.json');
-    const again3 = run3(null, '--upgrade-code');
+    const again3 = run3(null, '--upgrade-code', '--new-registrar-key');
     expect(again3.status === 0 && again3.stdout.includes('upgrade_code_keep_state'), 'a second 2.2.0 upgrade is a plain code deploy');
   } finally {
     await sb3.tearDown().catch(() => {});

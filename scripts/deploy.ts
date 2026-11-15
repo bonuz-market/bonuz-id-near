@@ -122,6 +122,11 @@ if (network === 'mainnet' && !args.has('--yes-mainnet') && !args.has('--prepare-
 for (const flag of ['--demo-links', '--demo-week-cap']) {
   if (network === 'mainnet' && args.has(flag)) fail(`${flag} is not allowed on mainnet`);
 }
+// The post-deploy checks want a registrar key with this version's methods; without a new
+// key an upgrade would land and then fail its checks. So refuse before anything is read.
+if (args.has('--upgrade-code') && !args.has('--new-registrar-key')) {
+  fail('--upgrade-code needs --new-registrar-key (the registrar key must carry this version\'s methods)');
+}
 
 // What the registrar's function-call key may call. 2.2.0 adds the pending-claim,
 // label and migration methods; a 2.1.0 key (link + unlink_by_registrar) needs --new-registrar-key.
@@ -343,6 +348,17 @@ if (!alreadyLive) {
     : await addFcKey();
 } else {
   if (args.has('--upgrade-code')) {
+    // The bigger wasm locks more storage. The registry must still be at or above its
+    // reserve afterwards, or every link would be refused: top it up first.
+    const acct = await provider.viewAccount({ accountId: P.contract });
+    const oldCode = (await provider.query({ request_type: 'view_code', finality: 'final', account_id: P.contract })) as unknown as { code_base64: string };
+    const extraBytes = BigInt(wasm.length - Buffer.from(oldCode.code_base64, 'base64').length);
+    const byteCost = 10n ** 19n;
+    const freeAfter = BigInt(acct.amount) - (BigInt(acct.storage_usage) + (extraBytes > 0n ? extraBytes : 0n) + 2_000n) * byteCost;
+    if (freeAfter < near(P.reserve)) {
+      fail(`after the upgrade ${P.contract} would have ${Number(freeAfter / 10n ** 21n) / 1000} NEAR free, under its ${P.reserve} NEAR reserve; send it more NEAR first`);
+    }
+    console.log(`    free balance after the upgrade: about ${Number(freeAfter / 10n ** 21n) / 1000} NEAR (reserve ${P.reserve})`);
     // Same major.minor = same stored layout. 2.1 -> 2.2 has migrate(); any other change is refused.
     const crate = readFileSync(new URL('../contracts/registry/Cargo.toml', import.meta.url), 'utf8').match(/^version = "(\d+\.\d+)\./m)?.[1];
     if (crate && liveVersion!.startsWith(`${crate}.`)) {
