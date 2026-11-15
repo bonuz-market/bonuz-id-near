@@ -1084,6 +1084,53 @@ fn a_handle_retake_in_flight_never_lands_on_the_new_holder() {
 }
 
 #[test]
+fn the_owner_can_drop_a_2_1_link_that_cannot_be_adopted_while_paused() {
+    // Two 2.1.0 links that both belong to one wallet: the second cannot be
+    // adopted, and unlink_by_registrar refuses while paused.
+    let (a, b) = (Wallet::new(1), Wallet::new(2));
+    write_v2_1_state(&a, &b);
+    let mut r = Registry::migrate();
+    ctx_yocto(OWNER, T0);
+    r.set_paused(true);
+    ctx(REGISTRAR, T0 + 1);
+    r.adopt_legacy_link(acc(&a.account()), eoa("mende"));
+    ctx(REGISTRAR, T0 + 1);
+    assert!(panics(|| r.adopt_legacy_link(acc(&b.account()), eoa("mende"))).contains("already linked"));
+    ctx(REGISTRAR, T0 + 1);
+    assert!(panics(|| {
+        r.unlink_by_registrar(acc(&b.account()));
+    })
+    .contains("paused"));
+    // Only the owner, with 1 yoctoNEAR, and only for a 2.1.0 link.
+    ctx_yocto(REGISTRAR, T0 + 2);
+    assert!(panics(|| r.drop_legacy_link(acc(&b.account()))).contains("only the registry owner"));
+    ctx(OWNER, T0 + 2);
+    assert!(panics(|| r.drop_legacy_link(acc(&b.account()))).contains("1 yoctoNEAR"));
+    ctx_yocto(OWNER, T0 + 2);
+    assert!(panics(|| r.drop_legacy_link(acc(&a.account()))).contains("no 2.1.0 link"));
+    ctx_yocto(OWNER, T0 + 2);
+    assert!(panics(|| r.drop_legacy_link(acc(ALICE))).contains("no 2.1.0 link"));
+    ctx_yocto(OWNER, T0 + 3);
+    r.drop_legacy_link(acc(&b.account()));
+    let ev = link_events();
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0]["event"], "unlink");
+    assert_eq!(ev[0]["data"]["reason"], "legacy");
+    assert_eq!(ev[0]["data"]["bonuz_id"], "olls");
+    assert!(ev[0]["data"]["bonuz_eoa"].is_null());
+    let s = r.status();
+    assert_eq!((s.links.0, s.legacy_links.0), (1, 0));
+    assert_eq!(r.account_of("olls".into()), None);
+    assert_eq!(r.link_of(acc(&b.account())), None);
+    // The backfill is done: after unpausing, links work again.
+    ctx_yocto(OWNER, T0 + 4);
+    r.set_paused(false);
+    ctx(REGISTRAR, T0 + 5);
+    link(&mut r, &signed(&Wallet::new(3), "fresh", 5, T0 + 480));
+    assert_eq!(r.account_of("fresh".into()), Some(acc(&Wallet::new(3).account())));
+}
+
+#[test]
 fn bad_wallets_and_handles_refused() {
     for bad in ["", "0x", "0xABCDEF0000000000000000000000000000000000", "1x0000000000000000000000000000000000000000", "0x00000000000000000000000000000000000000000"] {
         assert!(check_bonuz_eoa(bad).is_err(), "{bad}");

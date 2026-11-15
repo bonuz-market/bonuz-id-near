@@ -237,8 +237,9 @@ pub enum RegistryEvent {
         public_key: Option<String>,
         checked_by: String,
     },
-    /// `reason`: `registrar` (unlink_by_registrar), `owner` (unlink_by_owner) or
-    /// `replaced` (the same account was linked to another user).
+    /// `reason`: `registrar` (unlink_by_registrar), `owner` (unlink_by_owner),
+    /// `replaced` (the same account was linked to another user) or `legacy`
+    /// (the registry owner dropped a 2.1.0 link with drop_legacy_link).
     #[event_version("2.2.0")]
     Unlink { account_id: AccountId, bonuz_id: String, bonuz_eoa: Option<String>, reason: String },
     #[event_version("2.2.0")]
@@ -635,6 +636,20 @@ impl Registry {
     pub fn set_reserve(&mut self, reserve: NearToken) {
         self.assert_owner();
         self.reserve = reserve;
+    }
+
+    /// Removes a 2.1.0 link that cannot be adopted, for example a second 2.1.0
+    /// link of a wallet whose first one was adopted already. Only 2.1.0 (`V1`)
+    /// links; works while paused, so a backfill behind a pause never stalls on
+    /// one. Emits `unlink` with reason `legacy`.
+    #[payable]
+    pub fn drop_legacy_link(&mut self, account_id: AccountId) {
+        self.assert_owner();
+        require!(
+            matches!(self.links.get(&account_id), Some(VersionedLink::V1(_))),
+            "this NEAR account has no 2.1.0 link"
+        );
+        self.remove(&account_id, "legacy");
     }
 
     /// Raises (or lowers) the daily `unlink_by_registrar` cap until `until`
