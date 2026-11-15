@@ -273,12 +273,30 @@ export const signLink = (
 // ---- tiny read-only registry client (JSON-RPC, no SDK) ----
 
 export interface RegistryLink {
+  /** The current handle label (registry 2.2.0: `""` when the user's wallet has none). */
   bonuz_id: string;
+  /** Registry 2.2.0: the user's creation wallet; null for a link made by 2.1.0 and not yet adopted. */
+  bonuz_eoa?: string | null;
   public_key: string;
-  checked_by: 'contract' | 'registrar';
+  /** `account`: a named account confirmed the link itself with accept_link (registry 2.2.0). */
+  checked_by: 'contract' | 'registrar' | 'account';
   linked_at_block: string;
   linked_at: string;
 }
+
+/** Registry 2.2.0: a pending claim that the named account can accept. */
+export interface RegistryLinkProposal {
+  account_id: string;
+  bonuz_eoa: string;
+  bonuz_id: string | null;
+  /** Block time in nanoseconds. */
+  proposed_at: string;
+  /** Unix seconds. */
+  expires: string;
+}
+
+/** A bonuz creation wallet as the registry stores it: 0x and 40 lowercase hex characters. */
+export const isBonuzEoa = (value: string): boolean => /^0x[0-9a-f]{40}$/.test(value);
 
 export interface RegistryOpts {
   contractId: string;
@@ -289,7 +307,16 @@ export interface RegistryOpts {
 }
 
 export const viewRegistry = async <T>(
-  method: 'bonuz_of' | 'account_of' | 'link_of' | 'status',
+  method:
+    | 'bonuz_of'
+    | 'account_of'
+    | 'link_of'
+    | 'status'
+    | 'account_of_eoa'
+    | 'eoa_of'
+    | 'handle_of'
+    | 'link_proposal_of'
+    | 'link_proposal_for',
   args: Record<string, string>,
   opts: RegistryOpts,
 ): Promise<T> => {
@@ -321,3 +348,11 @@ export const accountOf = (bonuzId: string, opts: RegistryOpts) =>
   viewRegistry<string | null>('account_of', { bonuz_id: bonuzId }, opts);
 export const linkOf = (accountId: string, opts: RegistryOpts) =>
   viewRegistry<RegistryLink | null>('link_of', { account_id: accountId }, opts);
+/** Registry 2.2.0: the NEAR account linked to a creation wallet. */
+export const accountOfEoa = (bonuzEoa: string, opts: RegistryOpts) =>
+  viewRegistry<string | null>('account_of_eoa', { bonuz_eoa: bonuzEoa }, opts);
+/** Registry 2.2.0: the creation wallet a handle labels right now. */
+export const eoaOf = (bonuzId: string, opts: RegistryOpts) => viewRegistry<string | null>('eoa_of', { bonuz_id: bonuzId }, opts);
+/** Registry 2.2.0: the pending claim on a NEAR account (null once expired). */
+export const linkProposalOf = (accountId: string, opts: RegistryOpts) =>
+  viewRegistry<RegistryLinkProposal | null>('link_proposal_of', { account_id: accountId }, opts);

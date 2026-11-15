@@ -130,6 +130,19 @@ pub fn check_bonuz_id(bonuz_id: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// A bonuz user's creation wallet (EVM EOA) in canonical form: `0x` and 40
+/// lowercase hex characters. One wallet, one spelling on chain.
+pub fn check_bonuz_eoa(eoa: &str) -> Result<(), &'static str> {
+    let bytes = eoa.as_bytes();
+    if bytes.len() != 42
+        || !eoa.starts_with("0x")
+        || !bytes[2..].iter().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+    {
+        return Err("bonuz_eoa must be 0x and 40 lowercase hex characters");
+    }
+    Ok(())
+}
+
 /// The ed25519 key of a NEAR implicit account (exactly 64 lowercase hex chars).
 pub fn implicit_public_key(account_id: &str) -> Option<[u8; 32]> {
     let bytes = account_id.as_bytes();

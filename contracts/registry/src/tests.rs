@@ -110,7 +110,13 @@ fn link(r: &mut Registry, c: &Call) -> U64 {
         Base64VecU8(c.nonce.to_vec()),
         Base64VecU8(c.signature.clone()),
         c.message.clone(),
+        Some(eoa(&c.bonuz_id)),
     )
+}
+
+/// A stable test creation wallet per handle.
+fn eoa(handle: &str) -> String {
+    format!("0x{}", &hex::encode(Sha256::digest(handle.as_bytes()))[..40])
 }
 
 fn link_err(r: &mut Registry, c: &Call) -> String {
@@ -135,6 +141,11 @@ fn events() -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// The link and unlink events of the last call (label events left out).
+fn link_events() -> Vec<serde_json::Value> {
+    events().into_iter().filter(|e| e["event"] == "link" || e["event"] == "unlink").collect()
+}
+
 // ---------- proofs ----------
 
 #[test]
@@ -149,11 +160,13 @@ fn valid_link_writes_both_maps_and_one_event() {
     let l = r.link_of(acc).unwrap();
     assert_eq!(l.checked_by, "contract");
     assert_eq!(l.public_key, w.public_key());
-    let ev = events();
+    assert_eq!(l.bonuz_eoa, Some(eoa("mende")));
+    let ev = link_events();
     assert_eq!(ev.len(), 1);
     assert_eq!(ev[0]["event"], "link");
-    assert_eq!(ev[0]["version"], "2.0.0");
+    assert_eq!(ev[0]["version"], "2.2.0");
     assert_eq!(ev[0]["data"]["checked_by"], "contract");
+    assert_eq!(ev[0]["data"]["bonuz_eoa"], eoa("mende"));
 }
 
 #[test]
@@ -371,7 +384,7 @@ fn account_side_relink_replaces_the_old_pair() {
     assert_eq!(r.bonuz_of(acc.clone()).as_deref(), Some("new"));
     assert_eq!(r.account_of("old".into()), None);
     assert_eq!(r.account_of("new".into()), Some(acc));
-    let ev = events();
+    let ev = link_events();
     assert_eq!(ev[0]["event"], "unlink");
     assert_eq!(ev[0]["data"]["reason"], "replaced");
     assert_eq!(ev[0]["data"]["bonuz_id"], "old");
@@ -664,4 +677,492 @@ fn link_count_follows_every_path() {
     r.unlink_by_owner();
     assert_eq!(r.status().links.0, 0);
     assert_eq!(r.account_of("three".into()), None);
+}
+
+// ---------- 2.2.0: creation-wallet keys, labels, pending claims ----------
+
+const ALICE: &str = "alice.testnet";
+const BOB: &str = "bob.testnet";
+const TTL: u64 = LINK_PROPOSAL_TTL_SECONDS;
+
+/// The account itself signs (signer = predecessor), with 1 yoctoNEAR attached.
+fn ctx_self_yocto(account: &str, now_s: u64) {
+    testing_env!(VMContextBuilder::new()
+        .current_account_id(CONTRACT.parse().unwrap())
+        .predecessor_account_id(account.parse().unwrap())
+        .signer_account_id(account.parse().unwrap())
+        .block_timestamp(now_s * SEC)
+        .account_balance(NearToken::from_near(5))
+        .attached_deposit(NearToken::from_yoctonear(1))
+        .build());
+}
+
+fn panics<F: FnOnce()>(f: F) -> String {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(()) => panic!("the call was accepted"),
+        Err(e) => e
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default(),
+    }
+}
+
+fn acc(id: &str) -> AccountId {
+    id.parse().unwrap()
+}
+
+fn propose(r: &mut Registry, account: &str, handle: &str, now_s: u64) -> u64 {
+    ctx(REGISTRAR, now_s);
+    r.propose_link(acc(account), eoa(handle), handle.into()).0
+}
+
+fn accept(r: &mut Registry, account: &str, handle: &str, now_s: u64) {
+    ctx_self_yocto(account, now_s);
+    r.accept_link(eoa(handle));
+}
+
+#[test]
+fn propose_then_accept_makes_a_live_link_keyed_to_the_wallet() {
+    let mut r = registry("mainnet", false);
+    let expires = propose(&mut r, ALICE, "mende", T0);
+    assert_eq!(expires, T0 + TTL);
+    let ev = events();
+    assert_eq!(ev.last().unwrap()["event"], "link_proposed");
+    assert_eq!(ev.last().unwrap()["data"]["bonuz_eoa"], eoa("mende"));
+    // Pending: visible, but nothing is linked yet.
+    let p = r.link_proposal_of(acc(ALICE)).unwrap();
+    assert_eq!((p.bonuz_eoa.as_str(), p.bonuz_id.as_deref(), p.expires.0), (eoa("mende").as_str(), Some("mende"), T0 + TTL));
+    assert_eq!(r.link_proposal_for(eoa("mende")).unwrap().account_id, acc(ALICE));
+    assert_eq!(r.link_proposals(None, None).len(), 1);
+    assert_eq!(r.bonuz_of(acc(ALICE)), None);
+    assert_eq!(r.account_of("mende".into()), None);
+    assert_eq!(r.status().links.0, 0);
+    assert_eq!(r.status().stored_link_proposals, 1);
+
+    accept(&mut r, ALICE, "mende", T0 + 60);
+    let signer_pk = String::from(&env::signer_account_pk());
+    let l = r.link_of(acc(ALICE)).unwrap();
+    assert_eq!(l.checked_by, "account");
+    assert_eq!(l.public_key, signer_pk);
+    assert_eq!(l.bonuz_eoa, Some(eoa("mende")));
+    assert_eq!(l.bonuz_id, "mende");
+    assert_eq!(r.bonuz_of(acc(ALICE)).as_deref(), Some("mende"));
+    assert_eq!(r.account_of("mende".into()), Some(acc(ALICE)));
+    assert_eq!(r.account_of_eoa(eoa("mende")), Some(acc(ALICE)));
+    assert_eq!(r.eoa_of("mende".into()), Some(eoa("mende")));
+    assert_eq!(r.handle_of(eoa("mende")).as_deref(), Some("mende"));
+    assert!(r.link_proposal_of(acc(ALICE)).is_none());
+    assert_eq!(r.status().links.0, 1);
+    assert_eq!(r.status().stored_link_proposals, 0);
+    let names: Vec<_> = events().iter().map(|e| e["event"].as_str().unwrap().to_string()).collect();
+    assert_eq!(names, ["link_proposal_closed", "link"]);
+    assert_eq!(events()[0]["data"]["reason"], "accepted");
+}
+
+#[test]
+fn only_the_claimed_account_with_one_yocto_and_the_right_wallet_can_accept() {
+    let mut r = registry("mainnet", false);
+    propose(&mut r, ALICE, "mende", T0);
+    // Someone else has no claim to accept.
+    ctx_self_yocto(BOB, T0 + 1);
+    assert!(panics(|| r.accept_link(eoa("mende"))).contains("no pending link proposal"));
+    // The registrar cannot accept for the account.
+    ctx_self_yocto(REGISTRAR, T0 + 1);
+    assert!(panics(|| r.accept_link(eoa("mende"))).contains("no pending link proposal"));
+    // No deposit: a function-call key cannot accept.
+    ctx(ALICE, T0 + 1);
+    assert!(panics(|| r.accept_link(eoa("mende"))).contains("1 yoctoNEAR"));
+    // The claim names another wallet than the one accepted.
+    ctx_self_yocto(ALICE, T0 + 1);
+    assert!(panics(|| r.accept_link(eoa("other"))).contains("for another bonuz ID"));
+    assert_eq!(r.bonuz_of(acc(ALICE)), None);
+    // Only the registrar proposes.
+    ctx(ALICE, T0 + 2);
+    assert!(panics(|| {
+        r.propose_link(acc(ALICE), eoa("x"), "x".into());
+    })
+    .contains("only the bonuz registrar"));
+    accept(&mut r, ALICE, "mende", T0 + 3);
+    assert_eq!(r.bonuz_of(acc(ALICE)).as_deref(), Some("mende"));
+}
+
+#[test]
+fn a_claim_expires_after_seven_days_and_can_be_pruned() {
+    let mut r = registry("mainnet", false);
+    propose(&mut r, ALICE, "mende", T0);
+    // Valid one second before, refused at the expiry second.
+    ctx_self_yocto(ALICE, T0 + TTL);
+    assert!(panics(|| r.accept_link(eoa("mende"))).contains("expired"));
+    assert!(r.link_proposal_of(acc(ALICE)).is_none());
+    assert!(r.link_proposal_for(eoa("mende")).is_none());
+    assert!(r.link_proposals(None, None).is_empty());
+    assert_eq!(r.status().stored_link_proposals, 1, "still stored until pruned");
+    ctx(BOB, T0 + TTL);
+    assert_eq!(r.prune_link_proposals(10), 1);
+    assert_eq!(r.status().stored_link_proposals, 0);
+    assert_eq!(events()[0]["data"]["reason"], "expired");
+    // A fresh claim works again.
+    propose(&mut r, ALICE, "mende", T0 + TTL + 1);
+    accept(&mut r, ALICE, "mende", T0 + 2 * TTL);
+    assert_eq!(r.account_of("mende".into()), Some(acc(ALICE)));
+}
+
+#[test]
+fn accept_one_second_before_expiry_works() {
+    let mut r = registry("mainnet", false);
+    propose(&mut r, ALICE, "mende", T0);
+    accept(&mut r, ALICE, "mende", T0 + TTL - 1);
+    assert_eq!(r.bonuz_of(acc(ALICE)).as_deref(), Some("mende"));
+}
+
+#[test]
+fn an_account_or_a_wallet_cannot_be_claimed_twice() {
+    let mut r = registry("mainnet", false);
+    propose(&mut r, ALICE, "mende", T0);
+    // Same pair again: refreshes the expiry, no second claim.
+    assert_eq!(propose(&mut r, ALICE, "mende", T0 + 100), T0 + 100 + TTL);
+    assert_eq!(r.status().stored_link_proposals, 1);
+    // The same account for another user.
+    ctx(REGISTRAR, T0 + 101);
+    assert!(panics(|| {
+        r.propose_link(acc(ALICE), eoa("other"), "other".into());
+    })
+    .contains("already has a pending link proposal"));
+    // The same user for another account.
+    ctx(REGISTRAR, T0 + 101);
+    assert!(panics(|| {
+        r.propose_link(acc(BOB), eoa("mende"), "mende".into());
+    })
+    .contains("pending link proposal for another NEAR account"));
+    accept(&mut r, ALICE, "mende", T0 + 102);
+    // Linked now: claiming it again, or the wallet for another account, is refused.
+    ctx(REGISTRAR, T0 + 103);
+    assert!(panics(|| {
+        r.propose_link(acc(ALICE), eoa("mende"), "mende".into());
+    })
+    .contains("already linked to this bonuz ID"));
+    ctx(REGISTRAR, T0 + 103);
+    assert!(panics(|| {
+        r.propose_link(acc(BOB), eoa("mende"), "mende".into());
+    })
+    .contains("unlink it first"));
+    // Cancel frees a claim; reject by the account too.
+    propose(&mut r, BOB, "bobby", T0 + 104);
+    ctx(REGISTRAR, T0 + 105);
+    assert!(r.cancel_link_proposal(acc(BOB)));
+    assert!(!r.cancel_link_proposal(acc(BOB)));
+    propose(&mut r, BOB, "bobby", T0 + 106);
+    ctx(BOB, T0 + 107);
+    r.reject_link();
+    assert_eq!(events()[0]["data"]["reason"], "rejected");
+    assert!(r.link_proposal_of(acc(BOB)).is_none());
+    ctx(BOB, T0 + 108);
+    assert!(panics(|| r.reject_link()).contains("no pending link proposal"));
+}
+
+#[test]
+fn accept_refused_when_the_wallet_got_linked_to_another_account_meanwhile() {
+    let mut r = registry("testnet", true);
+    propose(&mut r, ALICE, "mende", T0);
+    // The registrar cancels and links an implicit account for the same user.
+    ctx(REGISTRAR, T0 + 1);
+    r.cancel_link_proposal(acc(ALICE));
+    let w = Wallet::new(1);
+    link(&mut r, &signed(&w, "mende", 1, T0 + 480));
+    ctx_self_yocto(ALICE, T0 + 2);
+    assert!(panics(|| r.accept_link(eoa("mende"))).contains("no pending link proposal"));
+    assert_eq!(r.account_of("mende".into()), Some(acc(&w.account())));
+}
+
+#[test]
+fn a_live_link_closes_open_claims_on_the_account_and_the_wallet() {
+    let mut r = registry("testnet", true);
+    let w = Wallet::new(1);
+    propose(&mut r, ALICE, "mende", T0);
+    ctx(REGISTRAR, T0 + 1);
+    link(&mut r, &signed(&w, "mende", 1, T0 + 480));
+    assert!(r.link_proposal_of(acc(ALICE)).is_none(), "the user's other claim is closed");
+    assert_eq!(r.status().stored_link_proposals, 0);
+}
+
+#[test]
+fn accepting_replaces_the_accounts_link_to_another_user() {
+    let mut r = registry("mainnet", false);
+    propose(&mut r, ALICE, "first", T0);
+    accept(&mut r, ALICE, "first", T0 + 1);
+    propose(&mut r, ALICE, "second", T0 + 2);
+    accept(&mut r, ALICE, "second", T0 + 3);
+    let ev = link_events();
+    assert_eq!((ev[0]["event"].as_str(), ev[0]["data"]["reason"].as_str()), (Some("unlink"), Some("replaced")));
+    assert_eq!(r.account_of("first".into()), None);
+    assert_eq!(r.account_of_eoa(eoa("first")), None);
+    assert_eq!(r.account_of("second".into()), Some(acc(ALICE)));
+    assert_eq!(r.status().links.0, 1);
+}
+
+#[test]
+fn accepted_links_unlink_by_owner_and_by_registrar() {
+    let mut r = registry("mainnet", false);
+    propose(&mut r, ALICE, "mende", T0);
+    accept(&mut r, ALICE, "mende", T0 + 1);
+    ctx_self_yocto(ALICE, T0 + 2);
+    r.unlink_by_owner();
+    assert_eq!(events()[0]["data"]["bonuz_eoa"], eoa("mende"));
+    assert_eq!(r.account_of("mende".into()), None);
+    assert_eq!(r.account_of_eoa(eoa("mende")), None);
+    assert_eq!(r.handle_of(eoa("mende")).as_deref(), Some("mende"), "the label stays");
+    propose(&mut r, ALICE, "mende", T0 + 3);
+    accept(&mut r, ALICE, "mende", T0 + 4);
+    ctx(REGISTRAR, T0 + 5);
+    assert!(r.unlink_by_registrar(acc(ALICE)));
+    assert_eq!(r.bonuz_of(acc(ALICE)), None);
+    assert_eq!(r.status().links.0, 0);
+}
+
+#[test]
+fn a_rename_keeps_the_link_and_a_new_holder_of_the_old_handle_inherits_nothing() {
+    let mut r = registry("testnet", true);
+    let w = Wallet::new(1);
+    ctx(REGISTRAR, T0);
+    link(&mut r, &signed(&w, "mende", 1, T0 + 480));
+    let user = eoa("mende");
+    // Rename @mende -> @matthias.
+    ctx(REGISTRAR, T0 + 1);
+    r.set_handle(user.clone(), Some("matthias".into()));
+    assert_eq!(r.bonuz_of(acc(&w.account())).as_deref(), Some("matthias"));
+    assert_eq!(r.account_of("matthias".into()), Some(acc(&w.account())));
+    assert_eq!(r.account_of("mende".into()), None);
+    assert_eq!(r.link_of(acc(&w.account())).unwrap().bonuz_id, "matthias");
+    // Someone else takes @mende: resolves to their wallet, which has no NEAR account.
+    let newcomer = "0x00000000000000000000000000000000000000aa".to_string();
+    ctx(REGISTRAR, T0 + 2);
+    r.set_handle(newcomer.clone(), Some("mende".into()));
+    assert_eq!(r.eoa_of("mende".into()), Some(newcomer.clone()));
+    assert_eq!(r.account_of("mende".into()), None);
+    // bonuz missed a rename: moving a label away leaves the old wallet's link, unlabelled.
+    ctx(REGISTRAR, T0 + 3);
+    r.set_handle(newcomer.clone(), Some("matthias".into()));
+    assert_eq!(r.account_of("matthias".into()), None);
+    assert_eq!(r.handle_of(user.clone()), None);
+    assert_eq!(r.bonuz_of(acc(&w.account())), None);
+    assert_eq!(r.account_of_eoa(user.clone()), Some(acc(&w.account())), "the link is still the wallet's");
+    assert_eq!(r.link_of(acc(&w.account())).unwrap().bonuz_id, "");
+    let ev = events();
+    assert_eq!(ev[0]["event"], "handle");
+    assert_eq!(ev[0]["data"]["bonuz_eoa"], user);
+    assert!(ev[0]["data"]["bonuz_id"].is_null());
+    // Clearing a label.
+    ctx(REGISTRAR, T0 + 4);
+    r.set_handle(newcomer.clone(), None);
+    assert_eq!(r.eoa_of("matthias".into()), None);
+    // Only the registrar labels.
+    ctx(BOB, T0 + 5);
+    assert!(panics(|| r.set_handle(user.clone(), Some("x".into()))).contains("only the bonuz registrar"));
+}
+
+#[test]
+fn link_without_a_wallet_needs_the_handle_to_be_a_label() {
+    let mut r = registry("testnet", true);
+    let w = Wallet::new(1);
+    let c = signed(&w, "mende", 1, T0 + 480);
+    let call = |r: &mut Registry, c: &Call| {
+        r.link(
+            c.account_id.parse().unwrap(),
+            c.bonuz_id.clone(),
+            c.public_key.clone(),
+            Base64VecU8(c.nonce.to_vec()),
+            Base64VecU8(c.signature.clone()),
+            c.message.clone(),
+            None,
+        )
+    };
+    ctx(REGISTRAR, T0);
+    assert!(panics(|| {
+        call(&mut r, &c);
+    })
+    .contains("pass bonuz_eoa"));
+    r.set_handle(eoa("mende"), Some("mende".into()));
+    call(&mut r, &c);
+    assert_eq!(r.account_of_eoa(eoa("mende")), Some(acc(&w.account())));
+}
+
+#[test]
+fn bad_wallets_and_handles_refused() {
+    for bad in ["", "0x", "0xABCDEF0000000000000000000000000000000000", "1x0000000000000000000000000000000000000000", "0x00000000000000000000000000000000000000000"] {
+        assert!(check_bonuz_eoa(bad).is_err(), "{bad}");
+    }
+    assert!(check_bonuz_eoa("0x00000000000000000000000000000000000000af").is_ok());
+    let mut r = registry("mainnet", false);
+    ctx(REGISTRAR, T0);
+    assert!(panics(|| {
+        r.propose_link(acc(ALICE), "0xABC".into(), "mende".into());
+    })
+    .contains("bonuz_eoa must be"));
+    ctx(REGISTRAR, T0);
+    assert!(panics(|| {
+        r.propose_link(acc(ALICE), eoa("x"), "Mende".into());
+    })
+    .contains("lowercase"));
+}
+
+#[test]
+fn paused_refuses_propose_and_accept_but_not_reject_or_cancel() {
+    let mut r = registry("mainnet", false);
+    propose(&mut r, ALICE, "mende", T0);
+    propose(&mut r, BOB, "bobby", T0);
+    ctx_yocto(OWNER, T0);
+    r.set_paused(true);
+    ctx(REGISTRAR, T0);
+    assert!(panics(|| {
+        r.propose_link(acc("carol.testnet"), eoa("carol"), "carol".into());
+    })
+    .contains("paused"));
+    ctx_self_yocto(ALICE, T0);
+    assert!(panics(|| r.accept_link(eoa("mende"))).contains("paused"));
+    ctx(ALICE, T0);
+    r.reject_link();
+    ctx(REGISTRAR, T0);
+    assert!(r.cancel_link_proposal(acc(BOB)));
+}
+
+#[test]
+fn pending_claims_are_capped() {
+    let mut r = registry("mainnet", false);
+    for i in 0..MAX_LINK_PROPOSALS {
+        ctx(REGISTRAR, T0);
+        r.propose_link(acc(&format!("a{i}.testnet")), format!("0x{i:040x}"), format!("h{i}"));
+    }
+    ctx(REGISTRAR, T0);
+    assert!(panics(|| {
+        r.propose_link(acc("one-more.testnet"), eoa("one-more"), "one-more".into());
+    })
+    .contains("too many pending link proposals"));
+    // A refresh of an existing claim still works at the cap.
+    ctx(REGISTRAR, T0 + 1);
+    r.propose_link(acc("a0.testnet"), format!("0x{:040x}", 0), "h0".into());
+    // Once they expire, proposing prunes and frees room.
+    ctx(BOB, T0 + TTL + 1);
+    assert_eq!(r.prune_link_proposals(1_000), 50, "at most 50 per call");
+    propose(&mut r, "one-more.testnet", "one-more", T0 + TTL + 2);
+}
+
+/// Writes a 2.1.0 state with two handle-keyed links, the way 2.1.0 stored it.
+fn write_v2_1_state(a: &Wallet, b: &Wallet) {
+    ctx(CONTRACT, T0);
+    let mut old = RegistryV2_1 {
+        owner: acc(OWNER),
+        pending_owner: None,
+        registrar: acc(REGISTRAR),
+        network: "testnet".into(),
+        allow_registrar_checked: true,
+        paused: false,
+        reserve: NearToken::from_near(1),
+        links: LookupMap::new(StorageKey::Links),
+        link_count: 2,
+        account_of: LookupMap::new(StorageKey::AccountOf),
+        nonces: IterableMap::new(StorageKey::Nonces),
+        raised_cap: Some((1000, T0 + 86_400)),
+        unlink_day: 7,
+        unlinks_today: 3,
+    };
+    for (w, handle) in [(a, "mende"), (b, "olls")] {
+        old.links.insert(
+            acc(&w.account()),
+            VersionedLink::V1(Link {
+                bonuz_id: handle.into(),
+                public_key: w.public_key(),
+                checked_by: "contract".into(),
+                linked_at_block: U64(42),
+                linked_at: U64(T0 * SEC),
+            }),
+        );
+        old.account_of.insert(handle.into(), acc(&w.account()));
+    }
+    old.nonces.insert([9; 32], T0 + 480);
+    old.links.flush();
+    old.account_of.flush();
+    old.nonces.flush();
+    env::state_write(&old);
+}
+
+#[test]
+fn migrate_keeps_2_1_links_readable_and_adopt_moves_them_to_the_wallet() {
+    let (a, b) = (Wallet::new(1), Wallet::new(2));
+    write_v2_1_state(&a, &b);
+    let mut r = Registry::migrate();
+    let s = r.status();
+    assert_eq!((s.links.0, s.legacy_links.0, s.stored_nonces), (2, 2, 1));
+    assert_eq!(s.raised_unlink_cap, Some((1000, U64(T0 + 86_400))));
+    assert_eq!(s.version, "2.2.0");
+    assert!(s.allow_registrar_checked);
+    // Old links read as before.
+    assert_eq!(r.bonuz_of(acc(&a.account())).as_deref(), Some("mende"));
+    assert_eq!(r.account_of("olls".into()), Some(acc(&b.account())));
+    let l = r.link_of(acc(&a.account())).unwrap();
+    assert_eq!((l.bonuz_id.as_str(), l.bonuz_eoa.clone(), l.linked_at_block.0), ("mende", None, 42));
+    // The used nonce is still refused.
+    ctx(REGISTRAR, T0 + 1);
+    let mut replay = signed(&a, "mende", 9, T0 + 480);
+    replay.nonce = [9; 32];
+    replay.signature = a.sign(&replay.message, [9; 32], CONTRACT);
+    assert!(link_err(&mut r, &replay).contains("nonce was already used"));
+    // A legacy handle cannot be relabelled or proposed for someone else before adoption.
+    ctx(REGISTRAR, T0 + 1);
+    assert!(panics(|| r.set_handle(eoa("x"), Some("mende".into()))).contains("2.1.0 link still names"));
+    ctx(REGISTRAR, T0 + 1);
+    assert!(panics(|| {
+        r.propose_link(acc(ALICE), eoa("x"), "mende".into());
+    })
+    .contains("unlink it first"));
+    ctx(REGISTRAR, T0 + 1);
+    let mut other = signed(&Wallet::new(3), "mende", 3, T0 + 480);
+    other.signature = Wallet::new(3).sign(&other.message, other.nonce, CONTRACT);
+    assert!(link_err(&mut r, &other).contains("unlink it first"));
+    // Adopt: the link moves to the wallet with its key and time.
+    ctx(REGISTRAR, T0 + 2);
+    r.adopt_legacy_link(acc(&a.account()), eoa("mende"));
+    let l = r.link_of(acc(&a.account())).unwrap();
+    assert_eq!((l.bonuz_id.as_str(), l.bonuz_eoa.clone(), l.linked_at_block.0, l.public_key.clone()), ("mende", Some(eoa("mende")), 42, a.public_key()));
+    assert_eq!(r.account_of("mende".into()), Some(acc(&a.account())));
+    assert_eq!(r.status().legacy_links.0, 1);
+    assert_eq!(r.status().links.0, 2);
+    ctx(REGISTRAR, T0 + 3);
+    assert!(panics(|| r.adopt_legacy_link(acc(&a.account()), eoa("mende"))).contains("no 2.1.0 link"));
+    // A rename now keeps it.
+    ctx(REGISTRAR, T0 + 4);
+    r.set_handle(eoa("mende"), Some("matthias".into()));
+    assert_eq!(r.bonuz_of(acc(&a.account())).as_deref(), Some("matthias"));
+    // The other legacy link: re-linking the same account converts it too.
+    ctx(REGISTRAR, T0 + 5);
+    link(&mut r, &signed(&b, "olls", 5, T0 + 480));
+    assert_eq!(r.status().legacy_links.0, 0);
+    assert_eq!(r.account_of_eoa(eoa("olls")), Some(acc(&b.account())));
+    assert_eq!(r.status().links.0, 2);
+    // Unlinking a legacy link updates the count too.
+}
+
+#[test]
+fn unlinking_a_legacy_link_counts_down() {
+    let (a, b) = (Wallet::new(1), Wallet::new(2));
+    write_v2_1_state(&a, &b);
+    let mut r = Registry::migrate();
+    ctx_yocto(&a.account(), T0);
+    r.unlink_by_owner();
+    let s = r.status();
+    assert_eq!((s.links.0, s.legacy_links.0), (1, 1));
+    assert_eq!(r.account_of("mende".into()), None);
+    assert!(events()[0]["data"]["bonuz_eoa"].is_null());
+}
+
+#[test]
+fn migrate_twice_fails() {
+    let (a, b) = (Wallet::new(1), Wallet::new(2));
+    write_v2_1_state(&a, &b);
+    let r = Registry::migrate();
+    env::state_write(&r);
+    assert!(panics(|| {
+        Registry::migrate();
+    })
+    .contains("Cannot deserialize"));
 }
