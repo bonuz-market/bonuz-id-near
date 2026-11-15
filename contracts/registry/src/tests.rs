@@ -159,7 +159,7 @@ fn valid_link_writes_both_maps_and_one_event() {
     assert_eq!(r.account_of("mende".into()), Some(acc.clone()));
     let l = r.link_of(acc).unwrap();
     assert_eq!(l.checked_by, "contract");
-    assert_eq!(l.public_key, w.public_key());
+    assert_eq!(l.public_key, Some(w.public_key()));
     assert_eq!(l.bonuz_eoa, Some(eoa("mende")));
     let ev = link_events();
     assert_eq!(ev.len(), 1);
@@ -744,7 +744,7 @@ fn propose_then_accept_makes_a_live_link_keyed_to_the_wallet() {
     let signer_pk = String::from(&env::signer_account_pk());
     let l = r.link_of(acc(ALICE)).unwrap();
     assert_eq!(l.checked_by, "account");
-    assert_eq!(l.public_key, signer_pk);
+    assert_eq!(l.public_key, Some(signer_pk));
     assert_eq!(l.bonuz_eoa, Some(eoa("mende")));
     assert_eq!(l.bonuz_id, "mende");
     assert_eq!(r.bonuz_of(acc(ALICE)).as_deref(), Some("mende"));
@@ -853,11 +853,11 @@ fn an_account_or_a_wallet_cannot_be_claimed_twice() {
     assert!(r.cancel_link_proposal(acc(BOB)));
     assert!(!r.cancel_link_proposal(acc(BOB)));
     propose(&mut r, BOB, "bobby", T0 + 106);
-    ctx(BOB, T0 + 107);
+    ctx_self_yocto(BOB, T0 + 107);
     r.reject_link();
     assert_eq!(events()[0]["data"]["reason"], "rejected");
     assert!(r.link_proposal_of(acc(BOB)).is_none());
-    ctx(BOB, T0 + 108);
+    ctx_self_yocto(BOB, T0 + 108);
     assert!(panics(|| r.reject_link()).contains("no pending link proposal"));
 }
 
@@ -1020,7 +1020,7 @@ fn paused_refuses_propose_and_accept_but_not_reject_or_cancel() {
     .contains("paused"));
     ctx_self_yocto(ALICE, T0);
     assert!(panics(|| r.accept_link(eoa("mende"))).contains("paused"));
-    ctx(ALICE, T0);
+    ctx_self_yocto(ALICE, T0);
     r.reject_link();
     ctx(REGISTRAR, T0);
     assert!(r.cancel_link_proposal(acc(BOB)));
@@ -1114,16 +1114,16 @@ fn migrate_keeps_2_1_links_readable_and_adopt_moves_them_to_the_wallet() {
     assert!(panics(|| {
         r.propose_link(acc(ALICE), eoa("x"), "mende".into());
     })
-    .contains("unlink it first"));
+    .contains("not all adopted yet"));
     ctx(REGISTRAR, T0 + 1);
     let mut other = signed(&Wallet::new(3), "mende", 3, T0 + 480);
     other.signature = Wallet::new(3).sign(&other.message, other.nonce, CONTRACT);
-    assert!(link_err(&mut r, &other).contains("unlink it first"));
+    assert!(link_err(&mut r, &other).contains("not all adopted yet"));
     // Adopt: the link moves to the wallet with its key and time.
     ctx(REGISTRAR, T0 + 2);
     r.adopt_legacy_link(acc(&a.account()), eoa("mende"));
     let l = r.link_of(acc(&a.account())).unwrap();
-    assert_eq!((l.bonuz_id.as_str(), l.bonuz_eoa.clone(), l.linked_at_block.0, l.public_key.clone()), ("mende", Some(eoa("mende")), 42, a.public_key()));
+    assert_eq!((l.bonuz_id.as_str(), l.bonuz_eoa.clone(), l.linked_at_block.0, l.public_key.clone()), ("mende", Some(eoa("mende")), 42, Some(a.public_key())));
     assert_eq!(r.account_of("mende".into()), Some(acc(&a.account())));
     assert_eq!(r.status().legacy_links.0, 1);
     assert_eq!(r.status().links.0, 2);
@@ -1133,13 +1133,16 @@ fn migrate_keeps_2_1_links_readable_and_adopt_moves_them_to_the_wallet() {
     ctx(REGISTRAR, T0 + 4);
     r.set_handle(eoa("mende"), Some("matthias".into()));
     assert_eq!(r.bonuz_of(acc(&a.account())).as_deref(), Some("matthias"));
-    // The other legacy link: re-linking the same account converts it too.
+    // While one 2.1.0 link is left, new links wait; once it is adopted they work.
     ctx(REGISTRAR, T0 + 5);
-    link(&mut r, &signed(&b, "olls", 5, T0 + 480));
+    assert!(link_err(&mut r, &signed(&b, "olls", 5, T0 + 480)).contains("not all adopted yet"));
+    ctx(REGISTRAR, T0 + 5);
+    r.adopt_legacy_link(acc(&b.account()), eoa("olls"));
     assert_eq!(r.status().legacy_links.0, 0);
+    ctx(REGISTRAR, T0 + 6);
+    link(&mut r, &signed(&b, "olls", 6, T0 + 480));
     assert_eq!(r.account_of_eoa(eoa("olls")), Some(acc(&b.account())));
     assert_eq!(r.status().links.0, 2);
-    // Unlinking a legacy link updates the count too.
 }
 
 #[test]
@@ -1165,4 +1168,148 @@ fn migrate_twice_fails() {
         Registry::migrate();
     })
     .contains("Cannot deserialize"));
+}
+
+// ---------- review fixes ----------
+
+fn ctx_balance(caller: &str, now_s: u64, balance: NearToken) {
+    testing_env!(VMContextBuilder::new()
+        .current_account_id(CONTRACT.parse().unwrap())
+        .predecessor_account_id(caller.parse().unwrap())
+        .signer_account_id(caller.parse().unwrap())
+        .block_timestamp(now_s * SEC)
+        .account_balance(balance)
+        .build());
+}
+
+#[test]
+fn a_wallet_with_an_unadopted_2_1_link_cannot_get_a_second_account() {
+    let (a, b) = (Wallet::new(1), Wallet::new(2));
+    write_v2_1_state(&a, &b);
+    let mut r = Registry::migrate();
+    // The user behind 2.1.0 "mende" (wallet eoa("mende")) tries a second account.
+    let c = Wallet::new(3);
+    ctx(REGISTRAR, T0 + 1);
+    let mut call = signed(&c, "fresh", 3, T0 + 480);
+    call.signature = c.sign(&call.message, call.nonce, CONTRACT);
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        r.link(
+            call.account_id.parse().unwrap(),
+            call.bonuz_id.clone(),
+            call.public_key.clone(),
+            Base64VecU8(call.nonce.to_vec()),
+            Base64VecU8(call.signature.clone()),
+            call.message.clone(),
+            Some(eoa("mende")),
+        );
+    }));
+    assert!(err.is_err());
+    ctx(REGISTRAR, T0 + 1);
+    assert!(panics(|| {
+        r.propose_link(acc(ALICE), eoa("mende"), "fresh".into());
+    })
+    .contains("not all adopted yet"));
+    // The backfill can run behind a pause.
+    ctx_yocto(OWNER, T0 + 2);
+    r.set_paused(true);
+    ctx(REGISTRAR, T0 + 3);
+    r.adopt_legacy_link(acc(&a.account()), eoa("mende"));
+    r.adopt_legacy_link(acc(&b.account()), eoa("olls"));
+    assert_eq!(r.status().legacy_links.0, 0);
+    ctx_yocto(OWNER, T0 + 4);
+    r.set_paused(false);
+    // Now the wallet's own link is visible and a second account is refused.
+    ctx(REGISTRAR, T0 + 5);
+    let mut call = signed(&c, "mende", 5, T0 + 480);
+    call.signature = c.sign(&call.message, call.nonce, CONTRACT);
+    assert!(link_err(&mut r, &call).contains("unlink it first"));
+    assert_eq!(r.account_of_eoa(eoa("mende")), Some(acc(&a.account())));
+}
+
+#[test]
+fn link_and_propose_never_move_a_handle_from_another_linked_wallet() {
+    let mut r = registry("testnet", true);
+    let (a, b) = (Wallet::new(1), Wallet::new(2));
+    ctx(REGISTRAR, T0);
+    link(&mut r, &signed(&a, "mende", 1, T0 + 480)); // eoa("mende") holds @mende, linked
+    // Another wallet tries to take @mende through link: refused, as 2.1.0 did.
+    let mut call = signed(&b, "mende", 2, T0 + 480);
+    call.signature = b.sign(&call.message, call.nonce, CONTRACT);
+    let other_wallet = "0x00000000000000000000000000000000000000bb".to_string();
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        r.link(
+            call.account_id.parse().unwrap(),
+            call.bonuz_id.clone(),
+            call.public_key.clone(),
+            Base64VecU8(call.nonce.to_vec()),
+            Base64VecU8(call.signature.clone()),
+            call.message.clone(),
+            Some(other_wallet.clone()),
+        );
+    }));
+    assert!(res.is_err());
+    assert_eq!(r.eoa_of("mende".into()), Some(eoa("mende")), "the label did not move");
+    ctx(REGISTRAR, T0 + 1);
+    assert!(panics(|| {
+        r.propose_link(acc(ALICE), other_wallet.clone(), "mende".into());
+    })
+    .contains("unlink it first"));
+    // An explicit set_handle on the old wallet frees it; then it can be taken.
+    ctx(REGISTRAR, T0 + 2);
+    r.set_handle(eoa("mende"), Some("matthias".into()));
+    propose(&mut r, ALICE, "x", T0 + 3); // unrelated claim still fine
+    ctx(REGISTRAR, T0 + 4);
+    r.propose_link(acc(BOB), other_wallet.clone(), "mende".into());
+    assert_eq!(r.eoa_of("mende".into()), Some(other_wallet));
+    // A label of a wallet WITHOUT a live link may move (nothing is lost).
+    ctx(REGISTRAR, T0 + 5);
+    r.set_handle(eoa("lonely"), Some("lonely".into()));
+    propose(&mut r, "carol.testnet", "lonely2", T0 + 6);
+    ctx(REGISTRAR, T0 + 7);
+    r.propose_link(acc("dave.testnet"), "0x00000000000000000000000000000000000000cc".into(), "lonely".into());
+    assert_eq!(r.handle_of(eoa("lonely")), None);
+}
+
+#[test]
+fn label_writes_and_adoption_respect_the_reserve() {
+    let (a, b) = (Wallet::new(1), Wallet::new(2));
+    write_v2_1_state(&a, &b);
+    let mut r = Registry::migrate();
+    ctx_balance(REGISTRAR, T0, NearToken::from_millinear(500)); // reserve is 1 NEAR
+    assert!(panics(|| r.set_handle(eoa("x"), Some("x".into()))).contains("under its reserve"));
+    ctx_balance(REGISTRAR, T0, NearToken::from_millinear(500));
+    assert!(panics(|| r.adopt_legacy_link(acc(&a.account()), eoa("mende"))).contains("under its reserve"));
+    ctx(REGISTRAR, T0);
+    r.adopt_legacy_link(acc(&a.account()), eoa("mende"));
+}
+
+#[test]
+fn accept_through_a_contract_records_no_key() {
+    let mut r = registry("mainnet", false);
+    propose(&mut r, ALICE, "mende", T0);
+    // alice.testnet calls accept_link from a contract call: the signer is someone else.
+    testing_env!(VMContextBuilder::new()
+        .current_account_id(CONTRACT.parse().unwrap())
+        .predecessor_account_id(ALICE.parse().unwrap())
+        .signer_account_id(BOB.parse().unwrap())
+        .block_timestamp((T0 + 1) * SEC)
+        .account_balance(NearToken::from_near(5))
+        .attached_deposit(NearToken::from_yoctonear(1))
+        .build());
+    r.accept_link(eoa("mende"));
+    let l = r.link_of(acc(ALICE)).unwrap();
+    assert_eq!((l.checked_by.as_str(), l.public_key), ("account", None));
+    assert!(events().iter().any(|e| e["event"] == "link" && e["data"]["public_key"].is_null()));
+}
+
+#[test]
+fn reject_needs_one_yocto() {
+    let mut r = registry("mainnet", false);
+    propose(&mut r, ALICE, "mende", T0);
+    ctx(ALICE, T0 + 1);
+    assert!(panics(|| r.reject_link()).contains("1 yoctoNEAR"));
+    assert!(r.link_proposal_of(acc(ALICE)).is_some());
+    ctx_self_yocto(ALICE, T0 + 2);
+    r.reject_link();
+    assert!(r.link_proposal_of(acc(ALICE)).is_none());
 }

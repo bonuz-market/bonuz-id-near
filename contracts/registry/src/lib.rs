@@ -51,6 +51,8 @@ const NS_PER_DAY: u64 = 86_400 * 1_000_000_000;
 
 const ERR_TAKEN: &str = "this bonuz ID is linked to another NEAR account; unlink it first";
 const ERR_LEGACY: &str = "a 2.1.0 link still names this bonuz ID; adopt_legacy_link or unlink it first";
+const ERR_BACKFILL: &str =
+    "2.1.0 links are not all adopted yet; adopt_legacy_link (or unlink) them before new links or proposals";
 
 /// Variants are only ever appended: each one's index is its storage prefix.
 #[near]
@@ -86,7 +88,9 @@ pub struct Link {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LinkV2 {
     pub bonuz_eoa: String,
-    pub public_key: String,
+    /// The key that signed: the link message, or the `accept_link` transaction.
+    /// None when the account accepted through a contract (the key is not known).
+    pub public_key: Option<String>,
     /// `contract`, `registrar` or `account` (the account confirmed with `accept_link`).
     pub checked_by: String,
     pub linked_at_block: u64,
@@ -109,7 +113,8 @@ pub struct LinkView {
     pub bonuz_id: String,
     /// The user's creation wallet; null for a 2.1.0 link not yet adopted.
     pub bonuz_eoa: Option<String>,
-    pub public_key: String,
+    /// Null only for a link accepted through a contract call.
+    pub public_key: Option<String>,
     pub checked_by: String,
     pub linked_at_block: U64,
     pub linked_at: U64,
@@ -226,7 +231,7 @@ pub enum RegistryEvent {
         account_id: AccountId,
         bonuz_id: String,
         bonuz_eoa: Option<String>,
-        public_key: String,
+        public_key: Option<String>,
         checked_by: String,
     },
     /// `reason`: `registrar` (unlink_by_registrar), `owner` (unlink_by_owner) or
@@ -381,16 +386,16 @@ impl Registry {
                 env::panic_str("pass bonuz_eoa: from 2.2.0 a link is keyed to the user's creation wallet")
             }),
         };
-        if let Some(holder) = self.account_of.get(&bonuz_id) {
-            // A 2.1.0 link of this same account is replaced below; another account's is not.
-            require!(holder == &account_id, ERR_TAKEN);
-        }
+        // While 2.1.0 links wait for adoption, a wallet's old link is invisible here
+        // (it is keyed by handle), so a second live account could slip in.
+        require!(self.legacy_links == 0, ERR_BACKFILL);
         if let Some(holder) = self.account_of_eoa.get(&eoa) {
             require!(holder == &account_id, ERR_TAKEN);
         }
+        self.assert_handle_free_for(&bonuz_id, &eoa);
 
         self.nonces.insert(nonce, expires);
-        self.write_link(account_id, &eoa, Some(&bonuz_id), public_key, checked_by.as_str());
+        self.write_link(account_id, &eoa, Some(&bonuz_id), Some(public_key), checked_by.as_str());
         self.prune(PRUNE_PER_LINK);
         U64(env::block_height())
     }
@@ -405,14 +410,12 @@ impl Registry {
         self.assert_reserve();
         check_bonuz_eoa(&bonuz_eoa).unwrap_or_else(|e| env::panic_str(e));
         check_bonuz_id(&bonuz_id).unwrap_or_else(|e| env::panic_str(e));
-        if let Some(holder) = self.account_of.get(&bonuz_id) {
-            require!(holder == &account_id, ERR_TAKEN);
-            env::panic_str(ERR_LEGACY);
-        }
+        require!(self.legacy_links == 0, ERR_BACKFILL);
         if let Some(holder) = self.account_of_eoa.get(&bonuz_eoa) {
             require!(holder != &account_id, "this NEAR account is already linked to this bonuz ID");
             env::panic_str(ERR_TAKEN);
         }
+        self.assert_handle_free_for(&bonuz_id, &bonuz_eoa);
 
         self.prune_proposals(PRUNE_PER_LINK);
         let now = env::block_timestamp();
@@ -477,12 +480,17 @@ impl Registry {
             require!(holder == &account_id, ERR_TAKEN);
         }
         self.close_proposal(&account_id, "accepted");
-        let public_key = String::from(&env::signer_account_pk());
+        // The signer's key is the account's own key only when the account signed
+        // this transaction itself; through a contract call it is someone else's.
+        let public_key = (env::signer_account_id() == account_id).then(|| String::from(&env::signer_account_pk()));
         self.write_link(account_id, &bonuz_eoa, None, public_key, "account");
     }
 
-    /// The claimed NEAR account turns its pending claim down. Works while paused.
+    /// The claimed NEAR account turns its pending claim down. Attach exactly 1
+    /// yoctoNEAR (full-access key only, like `accept_link`). Works while paused.
+    #[payable]
     pub fn reject_link(&mut self) {
+        assert_one_yocto();
         let account_id = env::predecessor_account_id();
         require!(self.proposals.contains_key(&account_id), "this NEAR account has no pending link proposal");
         self.close_proposal(&account_id, "rejected");
@@ -494,6 +502,7 @@ impl Registry {
     pub fn set_handle(&mut self, bonuz_eoa: String, bonuz_id: Option<String>) {
         self.assert_registrar();
         require!(!self.paused, "the registry is paused");
+        self.assert_reserve();
         check_bonuz_eoa(&bonuz_eoa).unwrap_or_else(|e| env::panic_str(e));
         if let Some(handle) = &bonuz_id {
             check_bonuz_id(handle).unwrap_or_else(|e| env::panic_str(e));
@@ -504,9 +513,10 @@ impl Registry {
 
     /// Registrar only. Turns the 2.1.0 link of `account_id` into a 2.2.0 link
     /// of the user `bonuz_eoa`, keeping its key, time and handle (as the label).
+    /// Works while paused, so the backfill can run behind a pause.
     pub fn adopt_legacy_link(&mut self, account_id: AccountId, bonuz_eoa: String) {
         self.assert_registrar();
-        require!(!self.paused, "the registry is paused");
+        self.assert_reserve();
         check_bonuz_eoa(&bonuz_eoa).unwrap_or_else(|e| env::panic_str(e));
         let old = match self.links.get(&account_id) {
             Some(VersionedLink::V1(link)) => link.clone(),
@@ -522,7 +532,7 @@ impl Registry {
             account_id.clone(),
             VersionedLink::V2(LinkV2 {
                 bonuz_eoa: bonuz_eoa.clone(),
-                public_key: old.public_key.clone(),
+                public_key: Some(old.public_key.clone()),
                 checked_by: old.checked_by.clone(),
                 linked_at_block: old.linked_at_block.0,
                 linked_at: old.linked_at.0,
@@ -533,7 +543,7 @@ impl Registry {
             account_id,
             bonuz_id: old.bonuz_id,
             bonuz_eoa: Some(bonuz_eoa),
-            public_key: old.public_key,
+            public_key: Some(old.public_key),
             checked_by: old.checked_by,
         }
         .emit();
@@ -648,7 +658,7 @@ impl Registry {
             VersionedLink::V1(l) => LinkView {
                 bonuz_id: l.bonuz_id.clone(),
                 bonuz_eoa: None,
-                public_key: l.public_key.clone(),
+                public_key: Some(l.public_key.clone()),
                 checked_by: l.checked_by.clone(),
                 linked_at_block: l.linked_at_block,
                 linked_at: l.linked_at,
@@ -754,6 +764,16 @@ impl Registry {
         }
     }
 
+    /// `link` and `propose_link` never move a handle away from another wallet
+    /// that has a live link (2.1.0 refused that too). Moving it takes an explicit
+    /// `set_handle` first. A 2.1.0 link of the handle also blocks it.
+    fn assert_handle_free_for(&self, handle: &str, eoa: &str) {
+        require!(!self.account_of.contains_key(handle), ERR_LEGACY);
+        if let Some(other) = self.eoa_of_handle.get(handle) {
+            require!(other == eoa || !self.account_of_eoa.contains_key(other), ERR_TAKEN);
+        }
+    }
+
     fn proposal_view(&self, account_id: &AccountId, p: &Proposal) -> Option<LinkProposalView> {
         if is_expired(p.expires, env::block_timestamp()) {
             return None;
@@ -796,7 +816,14 @@ impl Registry {
     /// Writes the live link `account_id` -> `eoa`, replacing the account's
     /// other link, and closes any claim on either. Callers have checked that
     /// `eoa` is not linked to another account.
-    fn write_link(&mut self, account_id: AccountId, eoa: &str, handle: Option<&str>, public_key: String, checked_by: &str) {
+    fn write_link(
+        &mut self,
+        account_id: AccountId,
+        eoa: &str,
+        handle: Option<&str>,
+        public_key: Option<String>,
+        checked_by: &str,
+    ) {
         let same_user = matches!(self.links.get(&account_id), Some(VersionedLink::V2(l)) if l.bonuz_eoa == eoa);
         if !same_user && self.links.contains_key(&account_id) {
             self.remove(&account_id, "replaced");

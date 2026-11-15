@@ -63,6 +63,12 @@ Rules the contract keeps true:
 - One EOA has at most one live NEAR account and at most one pending claim.
 - A handle is either still named by a 2.1.0 link **or** a label of an EOA, never both.
   `set_handle` refuses a handle a 2.1.0 link still holds.
+- While any 2.1.0 link waits for adoption (`legacy_links > 0`), `link` and `propose_link`
+  refuse. A 2.1.0 link is keyed by handle, so the contract cannot see which wallet it
+  belongs to; without this gate that wallet could get a second live account.
+- `link` and `propose_link` never move a handle away from another wallet that has a live
+  link (2.1.0 refused that case too, "unlink it first"). Moving it takes an explicit
+  `set_handle` on the old wallet first. A label of a wallet without a live link may move.
 
 ## Renames and handle reuse
 
@@ -85,18 +91,22 @@ New or changed (registrar = the bonuz registrar account; FC = its function-call 
 link(account_id, bonuz_id, public_key, nonce, signature, message, bonuz_eoa?: String) -> U64
     registrar. Unchanged NEP-413 check. With bonuz_eoa: labels bonuz_id -> bonuz_eoa and
     links account -> bonuz_eoa. Without it: the handle must already be a label; refused
-    otherwise ("pass bonuz_eoa ...").
+    otherwise ("pass bonuz_eoa ..."). Refused while 2.1.0 links wait for adoption, and
+    when the handle labels another wallet that has a live link.
 propose_link(account_id, bonuz_eoa, bonuz_id) -> U64 (expires, unix seconds)
     registrar. Labels bonuz_id -> bonuz_eoa and writes a pending claim valid 7 days.
     Same account + same wallet again only refreshes the expiry (safe retry). Refused when
-    the account or the wallet already has another pending claim, or the wallet is linked
-    to another account.
+    the account or the wallet already has another pending claim, the wallet is linked
+    to another account, the handle labels another linked wallet, or 2.1.0 links wait
+    for adoption.
 cancel_link_proposal(account_id) -> bool          registrar. False when there is none.
 accept_link(bonuz_eoa)                            the claimed account itself, 1 yoctoNEAR.
-reject_link()                                     the claimed account itself.
+reject_link()                                     the claimed account itself, 1 yoctoNEAR.
 set_handle(bonuz_eoa, bonuz_id?: String)          registrar. Sets, moves or clears a label.
+    Refused under the reserve, like propose_link.
 adopt_legacy_link(account_id, bonuz_eoa)          registrar. Turns a 2.1.0 link into a
-    2.2.0 one, keeping its handle as the label. Migration backfill.
+    2.2.0 one, keeping its handle as the label. Migration backfill. Works while paused;
+    refused under the reserve.
 prune_link_proposals(limit) -> u32                anyone. Deletes up to 50 expired claims.
 migrate()                                         private (the contract account), once.
 ```
@@ -114,7 +124,9 @@ none) and adds `bonuz_eoa` (null for a 2.1.0 link). `status()` adds
 `legacy_links`.
 
 Accepted links record `checked_by: "account"` and the public key that signed the
-`accept_link` transaction.
+`accept_link` transaction, but only when the account signed it itself (signer =
+predecessor). When the account accepts through a contract call, the signing key belongs to
+someone else, so `public_key` is null in `link_of` and in the `link` event.
 
 Events (standard `bonuz_id_near`): `link` and `unlink` move to version 2.2.0 and add
 `bonuz_eoa`; new `link_proposed`, `link_proposal_closed` (reason `accepted`, `rejected`,
@@ -138,14 +150,18 @@ Events (standard `bonuz_id_near`): `link` and `unlink` move to version 2.2.0 and
   block, the accept fails instead of linking to the wrong user.
 - **Someone else accepting**: `accept_link` only acts on the claim of the predecessor
   account. A third party has no claim to accept.
-- **1 yoctoNEAR on accept**: only a full-access key (the user's wallet) can attach a
-  deposit, so a function-call key some dapp added cannot accept on the user's behalf.
+- **1 yoctoNEAR on accept and reject**: only a full-access key (the user's wallet) can
+  attach a deposit, so a function-call key some dapp added can neither accept nor turn
+  down a claim on the user's behalf.
 - **The wallet got linked meanwhile**: `accept_link` re-checks. If the wallet is linked to
   another NEAR account by then, the accept fails ("unlink it first"), the same rule `link`
   has for a taken handle. If the accepting account was linked to another wallet, that old
   link is replaced: the account's own accept is the consent, as with `link`.
-- **Paused**: `propose_link` and `accept_link` refuse while paused. `reject_link`,
-  `cancel_link_proposal` and `unlink_by_owner` still work.
+- **Paused**: `propose_link`, `accept_link`, `link` and `set_handle` refuse while paused.
+  `reject_link`, `cancel_link_proposal`, `unlink_by_owner` and `adopt_legacy_link` still
+  work, so the backfill can run behind a pause.
+- **Label spam**: `set_handle` has no cap, like `link`, but it is registrar-only and refuses
+  under the reserve, so a leaked key cannot drain the balance below it.
 
 ## Migration of 2.1.0 state
 
@@ -159,8 +175,10 @@ too, so the registry is never left with code that cannot read its state. A secon
 After the upgrade, 2.1.0 links still read correctly (`bonuz_of`, `account_of`, `link_of`).
 BonuzAdmin then calls `adopt_legacy_link(account, W)` for each, with W = the creation
 wallet of the user whose outbox row made the link (not whoever holds the handle now).
-`status().legacy_links` counts down to 0. Mainnet has very few links (it went live
-14 Nov), testnet a handful.
+`status().legacy_links` counts down to 0. Until it is 0, `link` and `propose_link`
+refuse (see the rules above), so the backfill comes right after the upgrade, if needed
+behind a pause (adoption works while paused). Mainnet has very few links (it went live
+14 Nov; 0 at the time of the review), testnet a handful.
 
 ## What this does not do
 
@@ -182,6 +200,14 @@ accepts -> `accept_link` by the account -> views -> `unlink_by_owner`. Every has
 [`deploy/testnet-2.2.0-rehearsal.json`](../deploy/testnet-2.2.0-rehearsal.json).
 `id.bonuz.testnet` (the hackathon testnet registry) was not touched.
 
+That run used the build before the review fixes (wasm sha256 `c32f60ac...`). The fixes (the
+backfill gate, no silent handle moves, reserve checks, the accept key, 1 yoctoNEAR on reject,
+the deploy guards) are covered by unit tests, the sandbox upgrade test from the frozen 2.1.0
+wasm, and `node scripts/rehearse-deploy.ts`. The testnet run was not repeated because the
+funder is low. Note that the `r22` testnet registry stores `LinkV2.public_key` as a plain
+string, while the fixed build stores it as optional, so `r22` must not be upgraded in place to
+the fixed build. It is a throwaway account.
+
 ## Mainnet upgrade: prepared, NOT run
 
 Not before 26 Nov 2026, and only after Mende says yes at the time.
@@ -195,6 +221,10 @@ Not before 26 Nov 2026, and only after Mende says yes at the time.
    (`shasum -a 256`; the PR records its hash).
 3. Read only: `status()` on `id.bonuz-id.near` says `2.1.0`, and note `links`.
 4. `node scripts/deploy.ts --network mainnet --yes-mainnet --upgrade-code --new-registrar-key`
+   (`--upgrade-code` without `--new-registrar-key` is refused before any network call)
+   - before sending, the script checks the registry's free balance after the upgrade (the
+     bigger wasm locks about 0.55 NEAR more) stays at or above the 1 NEAR reserve, and
+     stops otherwise: top up `id.bonuz-id.near` first;
    - one transaction `DeployContract + migrate()` signed by `id.bonuz-id.near`'s deploy key
      (step `upgrade_code_and_migrate_2_1_to_2_2`); a failed migrate undoes the deploy;
    - a new function-call key on `registrar.bonuz-id.near` with the 2.2.0 registrar methods,
@@ -208,7 +238,9 @@ Not before 26 Nov 2026, and only after Mende says yes at the time.
    key>`), restart the app, then delete the old function-call key from
    `registrar.bonuz-id.near` with its full-access key.
 7. Backfill: for each 2.1.0 link, `adopt_legacy_link(account, W)` with W = the creation wallet
-   of the user whose outbox row made the link. Done when `legacy_links` is 0.
+   of the user whose outbox row made the link. Done when `legacy_links` is 0. New links
+   and claims wait until then. If there are any 2.1.0 links, pause first
+   (`set_paused(true)`), adopt them all, then unpause.
 8. Named accounts go live when BonuzAdmin and the app use `propose_link` / `accept_link`.
    `allow_registrar_checked` stays `false` on mainnet.
 
@@ -224,7 +256,8 @@ BonuzAdmin (`src/services/nearRegistry/`):
 - `registrar.ts`: send `bonuz_eoa` (the user's `walletAddress`, lowercased) in `link`; new
   `proposeLink`, `cancelLinkProposal`, `setHandle`, `adoptLegacyLink` and the new views;
   map the new refusals (`pending link proposal`, `too many pending link proposals`,
-  `2.1.0 link still names`, `pass bonuz_eoa`).
+  `2.1.0 link still names`, `not all adopted yet`, `pass bonuz_eoa`); treat
+  `link_of(...).public_key` as nullable.
 - `nearEdit.ts onHandleChanged`: stop dropping the NEAR verification on a rename; call
   `set_handle(W, newHandle)` instead. Account deletion: `unlink_by_registrar` (as today) plus
   `set_handle(W, null)`.

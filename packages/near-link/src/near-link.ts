@@ -277,7 +277,8 @@ export interface RegistryLink {
   bonuz_id: string;
   /** Registry 2.2.0: the user's creation wallet; null for a link made by 2.1.0 and not yet adopted. */
   bonuz_eoa?: string | null;
-  public_key: string;
+  /** Registry 2.2.0: null only for a link a named account accepted through a contract call. */
+  public_key: string | null;
   /** `account`: a named account confirmed the link itself with accept_link (registry 2.2.0). */
   checked_by: 'contract' | 'registrar' | 'account';
   linked_at_block: string;
