@@ -6,7 +6,7 @@
  * any surprise. Uses throwaway keys in a temp folder.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -52,7 +52,7 @@ try {
   await registrar.callFunction({
     contractId: 'id.sandbox',
     methodName: 'link',
-    args: { account_id: input.accountId, bonuz_id: input.bonuzId, public_key: input.publicKey, nonce: input.nonce, signature: input.signature, message: input.message },
+    args: { account_id: input.accountId, bonuz_id: input.bonuzId, public_key: input.publicKey, nonce: input.nonce, signature: input.signature, message: input.message, bonuz_eoa: `0x${'ab'.repeat(20)}` },
     gas: 30_000_000_000_000n,
   });
   expect((await bonuzOf(input.accountId, views)) === 'mende', 'registrar function-call key links an unfunded app wallet');
@@ -125,11 +125,57 @@ try {
     expect(real.status === 0 && (real.stdout.match(/check ok/g)?.length ?? 0) === 13, 'wallet-created accounts: deploy passes all 13 checks without the owner key');
     expect(/add_sandbox_key_to_id\.sandbox/.test(real.stdout), "the owner's wallet key is added to the registry account as a backup");
     const s2 = await viewRegistry<{ owner: string; links: string; version: string }>('status', {}, { contractId: 'id.sandbox', rpcUrl: sb2.rpcUrl, finality: 'optimistic' });
-    expect(s2.owner === 'sandbox' && s2.links === '0' && s2.version === '2.1.0', 'status shows owner, link count and version 2.1.0');
+    expect(s2.owner === 'sandbox' && s2.links === '0' && s2.version === '2.2.0', 'status shows owner, link count and version 2.2.0');
     const again = run();
     expect(again.status === 0 && !/ok  (add_|deploy_and)/.test(again.stdout), 'rerun after the wallet path changes nothing');
   } finally {
     await sb2.tearDown().catch(() => {});
+  }
+
+  // 7. The 2.2.0 upgrade of a live 2.1.0 registry: deploy + migrate in one
+  //    transaction, then a new registrar key with the 2.2.0 methods.
+  const sb3 = await Sandbox.start({});
+  const creds3 = mkdtempSync(join(tmpdir(), 'bonuz-deploy-rehearsal-upgrade-'));
+  try {
+    mkdirSync(join(creds3, 'sandbox'), { recursive: true });
+    writeFileSync(
+      join(creds3, 'sandbox', `${DEFAULT_ACCOUNT_ID}.json`),
+      JSON.stringify({ account_id: DEFAULT_ACCOUNT_ID, public_key: DEFAULT_PUBLIC_KEY, private_key: DEFAULT_PRIVATE_KEY }),
+    );
+    const env3 = { ...env, SANDBOX_RPC: sb3.rpcUrl, NEAR_CREDENTIALS_DIR: creds3, SANDBOX_RECORD: join(creds3, 'record.json') };
+    const run3 = (wasm: string | null, ...flags: string[]) =>
+      spawnSync('node', ['scripts/deploy.ts', '--network', 'sandbox', ...flags], {
+        env: wasm ? { ...env3, SANDBOX_WASM: wasm } : env3,
+        encoding: 'utf8',
+      });
+    const p3 = new JsonRpcProvider({ url: sb3.rpcUrl });
+    const v3 = { contractId: 'id.sandbox', rpcUrl: sb3.rpcUrl, finality: 'optimistic' as const };
+    const old = run3('contracts/registry/res/bonuz_id_registry-2.1.0.wasm');
+    if (old.status) console.log('--- 2.1.0 run', old.stdout, old.stderr);
+    const s21 = await viewRegistry<{ version: string }>('status', {}, v3);
+    expect(old.status === 0 && s21.version === '2.1.0', 'a 2.1.0 registry deploys from the frozen wasm');
+    const fcFile = join(creds3, 'sandbox', 'registrar-fc', 'registrar.sandbox.json');
+    const reg3 = new Account('registrar.sandbox', p3, new KeyPairSigner(KeyPair.fromString(JSON.parse(readFileSync(fcFile, 'utf8')).private_key)));
+    const now3 = Math.floor(Number((await p3.viewBlock({ finality: 'final' })).header.timestamp_nanosec) / 1e9);
+    const l3 = signLink(randomBytes(32), { bonuzId: 'mende', network: 'testnet', expires: now3 + 480, recipient: 'id.sandbox', nonce: randomBytes(32) });
+    await reg3.callFunction({
+      contractId: 'id.sandbox',
+      methodName: 'link',
+      args: { account_id: l3.accountId, bonuz_id: l3.bonuzId, public_key: l3.publicKey, nonce: l3.nonce, signature: l3.signature, message: l3.message },
+      gas: 30_000_000_000_000n,
+    });
+    const up3 = run3(null, '--upgrade-code', '--new-registrar-key');
+    if (up3.status) console.log('--- upgrade run', up3.stdout, up3.stderr);
+    expect(up3.status === 0 && up3.stdout.includes('upgrade_code_and_migrate_2_1_to_2_2'), '2.1.0 -> 2.2.0 goes out as deploy + migrate in one transaction');
+    expect((up3.stdout.match(/check ok/g)?.length ?? 0) === 13, 'all 13 checks pass after the upgrade and the new registrar key');
+    const s22 = await viewRegistry<{ version: string; links: string; legacy_links: string }>('status', {}, v3);
+    expect(s22.version === '2.2.0' && s22.links === '1' && s22.legacy_links === '1', 'status: 2.2.0, the 2.1.0 link kept and counted as legacy');
+    expect((await bonuzOf(l3.accountId, v3)) === 'mende', 'the 2.1.0 link still reads after the migration');
+    expect(existsSync(join(creds3, 'sandbox', 'registrar-fc', 'registrar.sandbox.1.json')), 'the old registrar key file is kept as .1.json');
+    const again3 = run3(null, '--upgrade-code');
+    expect(again3.status === 0 && again3.stdout.includes('upgrade_code_keep_state'), 'a second 2.2.0 upgrade is a plain code deploy');
+  } finally {
+    await sb3.tearDown().catch(() => {});
   }
 } finally {
   await sandbox.tearDown().catch(() => {});

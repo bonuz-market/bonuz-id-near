@@ -19,7 +19,13 @@
  * If the registry cannot be read for any other reason, the script stops before a write.
  *
  *   --prepare-keys     make the two account keys and print their public keys; no chain writes
- *   --upgrade-code     live registry: deploy the new wasm, keep the state
+ *   --upgrade-code     live registry: deploy the new wasm, keep the state. From 2.1.x to
+ *                      2.2.x the stored layout changes: the deploy and migrate() go out
+ *                      as ONE transaction, so a failed migrate undoes the deploy too
+ *   --new-registrar-key add a function-call key with this version's registrar methods.
+ *                      The old key file is kept as registrar-fc/<registrar>.<n>.json and
+ *                      its key stays on chain until you delete it (after the backend
+ *                      switched to the new one)
  *   --demo-links       testnet/sandbox only: two demo links
  *   --demo-week-cap    testnet only: set_unlink_daily_cap(1000) until 19 Nov 2026 00:00 UTC
  *   --yes-mainnet      required for any write on mainnet
@@ -27,7 +33,7 @@
  * Every run ends with an on-chain check and writes deploy/<network>.json.
  */
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -117,6 +123,11 @@ for (const flag of ['--demo-links', '--demo-week-cap']) {
   if (network === 'mainnet' && args.has(flag)) fail(`${flag} is not allowed on mainnet`);
 }
 
+// What the registrar's function-call key may call. 2.2.0 adds the pending-claim,
+// label and migration methods; a 2.1.0 key (link + unlink_by_registrar) needs --new-registrar-key.
+const REGISTRAR_METHODS = ['adopt_legacy_link', 'cancel_link_proposal', 'link', 'propose_link', 'set_handle', 'unlink_by_registrar'];
+// Demo links only: a stand-in creation wallet per handle (2.2.0 keys links to it).
+const demoEoa = (handle: string) => `0x${createHash('sha256').update(`bonuz-demo:${handle}`).digest('hex').slice(0, 40)}`;
 const DEMO_WEEK_CAP = { cap: 1000, until: Date.UTC(2026, 10, 19, 0, 0, 0) / 1000 };
 const near = (n: bigint) => n * 10n ** 24n;
 const credDir = join(process.env.NEAR_CREDENTIALS_DIR ?? join(homedir(), '.near-credentials'), network);
@@ -181,7 +192,12 @@ const ownerFullKeys = await fullKeysOf(P.owner);
 if (P.ownerKeys && JSON.stringify([...ownerFullKeys].sort()) !== JSON.stringify([...P.ownerKeys].sort())) {
   fail(`${P.owner}'s full-access keys on chain (${ownerFullKeys.join(', ')}) differ from the pinned ones in this script; check the wallet and update ownerKeys`);
 }
-const wasm = readFileSync(new URL('../contracts/registry/res/bonuz_id_registry.wasm', import.meta.url));
+// SANDBOX_WASM: the rehearsal deploys the frozen 2.1.0 wasm first, then upgrades. Sandbox only.
+const wasm = readFileSync(
+  network === 'sandbox' && process.env.SANDBOX_WASM
+    ? process.env.SANDBOX_WASM
+    : new URL('../contracts/registry/res/bonuz_id_registry.wasm', import.meta.url),
+);
 const wasmSha = createHash('sha256').update(wasm).digest('hex');
 const wasmCodeHash = base58.encode(createHash('sha256').update(wasm).digest());
 
@@ -205,6 +221,14 @@ if (needed > 0n) {
 // full-access keys and (registrar) our function-call key. An unknown key on the registry
 // account could call its private methods; one on the registrar could write links.
 const fcDir = join(credDir, 'registrar-fc');
+// The current function-call key is registrar-fc/<registrar>.json; earlier ones,
+// kept after --new-registrar-key, are registrar-fc/<registrar>.<n>.json.
+const knownFcKeys = () =>
+  existsSync(fcDir)
+    ? readdirSync(fcDir)
+        .filter((f) => f === `${P.registrar}.json` || (f.startsWith(`${P.registrar}.`) && /\.\d+\.json$/.test(f)))
+        .map((f) => JSON.parse(readFileSync(join(fcDir, f), 'utf8')).public_key as string)
+    : [];
 for (const [id, exists_] of [[P.contract, contractExists], [P.registrar, registrarExists]] as const) {
   if (!exists_) continue;
   const ours = publicKeyIn(id);
@@ -212,8 +236,8 @@ for (const [id, exists_] of [[P.contract, contractExists], [P.registrar, registr
   if (!keys.some((k) => k.public_key === ours && k.access_key.permission === 'FullAccess')) {
     fail(`the key in ${keyFile(id)} is not a full-access key of ${id}`);
   }
-  const fc = id === P.registrar && existsSync(keyFile(id, fcDir)) ? publicKeyIn(id, fcDir) : null;
-  const unknown = keys.filter((k) => k.public_key !== ours && k.public_key !== fc && !(k.access_key.permission === 'FullAccess' && ownerFullKeys.includes(k.public_key)));
+  const fcs = id === P.registrar ? knownFcKeys() : [];
+  const unknown = keys.filter((k) => k.public_key !== ours && !fcs.includes(k.public_key) && !(k.access_key.permission === 'FullAccess' && ownerFullKeys.includes(k.public_key)));
   if (unknown.length) fail(`${id} has keys bonuz does not hold: ${unknown.map((k) => k.public_key).join(', ')}. Delete them in the wallet first.`);
 }
 
@@ -284,7 +308,7 @@ const addFcKey = async () => {
       await registrarFull.addFunctionCallAccessKey({
         publicKey: fcKey.getPublicKey(),
         contractId: P.contract,
-        methodNames: ['link', 'unlink_by_registrar'],
+        methodNames: REGISTRAR_METHODS,
         allowance: near(P.keyAllowance),
       })
     ).transaction.hash,
@@ -319,12 +343,30 @@ if (!alreadyLive) {
     : await addFcKey();
 } else {
   if (args.has('--upgrade-code')) {
-    // Same major.minor = same stored layout. A different one needs a migrate method first.
+    // Same major.minor = same stored layout. 2.1 -> 2.2 has migrate(); any other change is refused.
     const crate = readFileSync(new URL('../contracts/registry/Cargo.toml', import.meta.url), 'utf8').match(/^version = "(\d+\.\d+)\./m)?.[1];
-    if (!crate || !liveVersion!.startsWith(`${crate}.`)) {
-      fail(`live ${liveVersion} and this wasm (${crate}.x) store state differently; an in-place upgrade would leave the registry unreadable`);
+    if (crate && liveVersion!.startsWith(`${crate}.`)) {
+      log('upgrade_code_keep_state', (await contract.deployContract(new Uint8Array(wasm))).transaction.hash);
+    } else if (crate === '2.2' && liveVersion!.startsWith('2.1.')) {
+      // One transaction: code and migrate land together or not at all.
+      log(
+        'upgrade_code_and_migrate_2_1_to_2_2',
+        (
+          await contract.signAndSendTransaction({
+            receiverId: P.contract,
+            actions: [actions.deployContract(new Uint8Array(wasm)), actions.functionCall('migrate', {}, 100_000_000_000_000n, 0n)],
+          })
+        ).transaction.hash,
+      );
+    } else {
+      fail(`live ${liveVersion} and this wasm (${crate}.x) store state differently and there is no migrate for that step`);
     }
-    log('upgrade_code_keep_state', (await contract.deployContract(new Uint8Array(wasm))).transaction.hash);
+  }
+  if (args.has('--new-registrar-key') && existsSync(keyFile(P.registrar, fcDir))) {
+    let n = 1;
+    while (existsSync(join(fcDir, `${P.registrar}.${n}.json`))) n++;
+    renameSync(keyFile(P.registrar, fcDir), join(fcDir, `${P.registrar}.${n}.json`));
+    console.log(`    the old function-call key file is now registrar-fc/${P.registrar}.${n}.json; its key stays on chain`);
   }
   registrar = existsSync(keyFile(P.registrar, fcDir))
     ? new Account(P.registrar, provider, loadKey(P.registrar, fcDir))
@@ -363,6 +405,7 @@ if (args.has('--demo-links')) {
         nonce: input.nonce,
         signature: input.signature,
         message: input.message,
+        bonuz_eoa: demoEoa(input.bonuzId),
       },
       gas: 30_000_000_000_000n,
     });
@@ -423,7 +466,7 @@ const checks: [string, boolean][] = [
   ['not paused', status.paused === false],
   ['registrar key is function-call only', !!fc],
   ['registrar key only reaches the registry', fc?.receiver_id === P.contract],
-  ['registrar key methods', JSON.stringify([...(fc?.method_names ?? [])].sort()) === JSON.stringify(['link', 'unlink_by_registrar'])],
+  ['registrar key methods', JSON.stringify([...(fc?.method_names ?? [])].sort()) === JSON.stringify(REGISTRAR_METHODS)],
   ['registrar key has a capped allowance', !!fc?.allowance],
   [`${P.owner} keys can also manage ${P.contract}`, ownerFullKeys.length > 0 && ownerFullKeys.every((k) => contractKeys.some((c) => c.public_key === k))],
   [`${P.owner} keys can also manage ${P.registrar}`, ownerFullKeys.length > 0 && ownerFullKeys.every((k) => registrarFullKeys.includes(k))],
@@ -440,7 +483,7 @@ const record = {
   owner: P.owner,
   registrar: P.registrar,
   backup_keys: `${P.owner}'s full-access keys are also full-access keys of ${P.contract} and ${P.registrar}`,
-  registrar_key: { kind: 'function-call', methods: ['link', 'unlink_by_registrar'], allowance_near: String(P.keyAllowance) },
+  registrar_key: { kind: 'function-call', methods: REGISTRAR_METHODS, allowance_near: String(P.keyAllowance) },
   reserve_near: String(P.reserve),
   allow_registrar_checked: status.allow_registrar_checked,
   rpc: P.rpc,
@@ -465,6 +508,7 @@ if (network !== 'sandbox' || process.env.SANDBOX_RECORD) {
           contract_version: record.contract_version,
           code_hash_bs58: record.code_hash_bs58,
           ...(args.has('--upgrade-code') ? { wasm_sha256_hex: wasmSha, built_from_commit: commit } : {}),
+          ...(args.has('--new-registrar-key') ? { registrar_key: record.registrar_key } : {}),
           unlink_daily_cap: args.has('--demo-week-cap') ? record.unlink_daily_cap : prev.unlink_daily_cap,
           transactions: { ...prev.transactions, ...tx },
           demo_links: { ...prev.demo_links, ...demoLinks },
