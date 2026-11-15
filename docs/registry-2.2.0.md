@@ -101,7 +101,7 @@ prune_link_proposals(limit) -> u32                anyone. Deletes up to 50 expir
 migrate()                                         private (the contract account), once.
 ```
 
-New views: `identity_of(account_id)`, `account_of_eoa(bonuz_eoa)`, `eoa_of(bonuz_id)`,
+New views: `account_of_eoa(bonuz_eoa)`, `eoa_of(bonuz_id)`,
 `handle_of(bonuz_eoa)`, `link_proposal_of(account_id)`, `link_proposal_for(bonuz_eoa)`,
 `link_proposals(from_index, limit)`. Expired claims read as none.
 
@@ -109,8 +109,9 @@ Unchanged: `unlink_by_registrar`, `unlink_by_owner`, `prune_nonces`, every owner
 `bonuz_of(account)` answers the current handle label. `account_of(handle)` resolves
 `handle -> EOA -> account`, falling back to the 2.1.0 map for a not yet adopted link.
 `link_of` keeps its fields (`bonuz_id` is the current label, `""` when the wallet has
-none) and adds `bonuz_eoa` (null for a 2.1.0 link). `status()` adds `pending_links`,
-`max_pending_links`, `link_proposal_ttl_seconds` and `legacy_links`.
+none) and adds `bonuz_eoa` (null for a 2.1.0 link). `status()` adds
+`stored_link_proposals`, `max_link_proposals`, `link_proposal_ttl_seconds` and
+`legacy_links`.
 
 Accepted links record `checked_by: "account"` and the public key that signed the
 `accept_link` transaction.
@@ -124,11 +125,12 @@ Events (standard `bonuz_id_near`): `link` and `unlink` move to version 2.2.0 and
 - **Who can write a claim**: only the registrar. Nobody else can fill storage with claims.
 - **Who pays**: the contract's own balance, like links. `propose_link` refuses under the
   reserve, as `link` does.
-- **Caps**: at most 1,000 pending claims at once (about 0.25 NEAR of storage at ~250 bytes
-  each), one per NEAR account, one per user. Every `propose_link` also deletes up to 3
+- **Caps**: at most 200 pending claims at once, one per NEAR account, one per user. A
+  claim (with its wallet index and label) measured +501 bytes on the sandbox, about 0.005
+  NEAR, so a full queue locks about 1 NEAR of the registry's balance. Every `propose_link` also deletes up to 3
   expired claims, and anyone can call `prune_link_proposals`.
 - **Expiry**: 7 days. An expired claim cannot be accepted and reads as none.
-- **A leaked registrar key** can fill the 1,000 slots for up to 7 days (owner pauses,
+- **A leaked registrar key** can fill the 200 slots for up to 7 days (owner pauses,
   rotates the registrar, and the registrar cancels), and can label handles. It still
   cannot make a live link to a named account it does not hold.
 - **Swapping a claim under the user**: `accept_link` names the wallet it accepts. If the
@@ -168,3 +170,86 @@ wallet of the user whose outbox row made the link (not whoever holds the handle 
   deliberately no `set_allow_registrar_checked`.
 - The NEP-413 message still names the handle, not the wallet, so the app's signing text
   and `packages/near-link` do not change.
+
+## Testnet rehearsal (15 Nov 2026)
+
+`node scripts/rehearse-2.2.0-testnet.ts --funder bonuz-readme-check.testnet` on fresh accounts
+`r22.bonuz-readme-check.testnet` (registry), `r22-registrar...` and `r22-alice...` (a named
+account): 2.1.0 deployed from the frozen wasm, three 2.1.0 links written (two implicit, one
+registrar-checked named), upgraded with deploy + migrate in one transaction, old links read
+back, a new registrar key, adopt, rename, a 2.2.0 implicit link, then propose -> three refused
+accepts -> `accept_link` by the account -> views -> `unlink_by_owner`. Every hash is in
+[`deploy/testnet-2.2.0-rehearsal.json`](../deploy/testnet-2.2.0-rehearsal.json).
+`id.bonuz.testnet` (the hackathon testnet registry) was not touched.
+
+## Mainnet upgrade: prepared, NOT run
+
+Not before 26 Nov 2026, and only after Mende says yes at the time.
+
+1. BonuzAdmin first: a release that sends `bonuz_eoa` on every `link` call. Registry 2.1.0
+   ignores the extra argument (pinned by the sandbox upgrade test), so this can ship before
+   the contract upgrade.
+2. On the deploy machine, in this repo at the merged commit:
+   `cd contracts/registry && cargo test` and `node scripts/rehearse-deploy.ts` (sandbox, both
+   pass), and check `contracts/registry/res/bonuz_id_registry.wasm` is the reviewed one
+   (`shasum -a 256`; the PR records its hash).
+3. Read only: `status()` on `id.bonuz-id.near` says `2.1.0`, and note `links`.
+4. `node scripts/deploy.ts --network mainnet --yes-mainnet --upgrade-code --new-registrar-key`
+   - one transaction `DeployContract + migrate()` signed by `id.bonuz-id.near`'s deploy key
+     (step `upgrade_code_and_migrate_2_1_to_2_2`); a failed migrate undoes the deploy;
+   - a new function-call key on `registrar.bonuz-id.near` with the 2.2.0 registrar methods,
+     saved to `~/.near-credentials/mainnet/registrar-fc/registrar.bonuz-id.near.json`; the old
+     file becomes `registrar.bonuz-id.near.1.json` and the old key stays on chain;
+   - all 13 post-deploy checks, and `deploy/mainnet.json` is updated. Commit it.
+5. Check: `status()` says `2.2.0`, `links` unchanged, `legacy_links` = `links`;
+   `bonuz_of` / `link_of` of every known link unchanged.
+6. Put the new function-call key into the production Key Vault secret
+   `NEAR-REGISTRAR-PRIVATE-KEY` (`az keyvault secret set ... --file <file holding only the
+   key>`), restart the app, then delete the old function-call key from
+   `registrar.bonuz-id.near` with its full-access key.
+7. Backfill: for each 2.1.0 link, `adopt_legacy_link(account, W)` with W = the creation wallet
+   of the user whose outbox row made the link. Done when `legacy_links` is 0.
+8. Named accounts go live when BonuzAdmin and the app use `propose_link` / `accept_link`.
+   `allow_registrar_checked` stays `false` on mainnet.
+
+Rollback: 2.1.0 code cannot read 2.2.0 state, so there is no going back by redeploying
+2.1.0. If something is wrong after step 4, the owner pauses (`set_paused(true)`, links and
+claims stop, owner unlinks and rejects still work) and a 2.2.x fix is deployed with
+`--upgrade-code` (same layout, plain code deploy).
+
+## What BonuzAdmin and the app need to change
+
+BonuzAdmin (`src/services/nearRegistry/`):
+
+- `registrar.ts`: send `bonuz_eoa` (the user's `walletAddress`, lowercased) in `link`; new
+  `proposeLink`, `cancelLinkProposal`, `setHandle`, `adoptLegacyLink` and the new views;
+  map the new refusals (`pending link proposal`, `too many pending link proposals`,
+  `2.1.0 link still names`, `pass bonuz_eoa`).
+- `nearEdit.ts onHandleChanged`: stop dropping the NEAR verification on a rename; call
+  `set_handle(W, newHandle)` instead. Account deletion: `unlink_by_registrar` (as today) plus
+  `set_handle(W, null)`.
+- `namedAccounts.ts` / `config.ts`: on mainnet, named accounts are allowed when the
+  registry's `status().version` is 2.2 or later (propose + accept), not only when
+  `allow_registrar_checked` is true. `IMPLICIT_ONLY_REFUSAL` goes away for 2.2.0.
+- Verify flow for a named account: after the NEP-413 check and the RPC key check, queue a
+  `propose` outbox op instead of `link`; the profile shows the account as verified only
+  once the chain shows `link_of(account).checked_by == "account"` with this user's wallet
+  (the app or the hourly check reads it). New outbox op kinds `propose` and
+  `cancel_proposal`, and a state for "waiting for the account to accept".
+- `check.ts`: compare `link_of(...).bonuz_eoa` with the user's wallet, not
+  `link.bonuz_id` with the handle (a rename is no longer a mismatch); skip the key re-check
+  (`namedKeyCheck.ts`) for `checked_by: "account"` links, whose consent is on chain.
+- One-off backfill job for step 7 above.
+- Registrar key rotation (step 6) and the docs (`docs/near-registry.md`).
+- Re-copy `packages/near-link` into `src/vendor/near-link/` with
+  `scripts/copy-near-link.ts` (new optional `bonuz_eoa`, `checked_by: "account"`, view
+  helpers).
+
+The app (bonuz-app-v2):
+
+- A named NEAR wallet (`mende.near`) shows "Confirm on NEAR" for a pending claim
+  (`link_proposal_of(account)`), and signs one transaction: `accept_link({ bonuz_eoa })` on
+  the registry with 1 yoctoNEAR, receiver the registry, about 3 Tgas. The review screen
+  names the registry contract, the method and the wallet.
+- A "Not me" action: `reject_link()`.
+- The verified badge for a named account follows `link_of(...).checked_by == "account"`.

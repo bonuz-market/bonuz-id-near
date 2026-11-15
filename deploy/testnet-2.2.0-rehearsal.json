@@ -1,0 +1,119 @@
+{
+  "purpose": "Testnet rehearsal of the registry 2.1.0 -> 2.2.0 upgrade on fresh accounts. Not id.bonuz.testnet, not mainnet.",
+  "network": "testnet",
+  "rpc": "https://rpc.testnet.fastnear.com",
+  "rehearsed_at_utc": "2026-11-15T15:10:43.334Z",
+  "built_from_commit": "b4a300f",
+  "accounts": {
+    "owner": "bonuz-readme-check.testnet",
+    "contract": "r22.bonuz-readme-check.testnet",
+    "registrar": "r22-registrar.bonuz-readme-check.testnet",
+    "alice": "r22-alice.bonuz-readme-check.testnet"
+  },
+  "explorer": "https://testnet.nearblocks.io/address/r22.bonuz-readme-check.testnet",
+  "wasm": {
+    "2.1.0": {
+      "sha256_hex": "049f1cbf4bc919c18597206e319d00a3dd57a76bf54ded2ceb6de9ce09736a0d",
+      "note": "frozen copy of the wasm live on id.bonuz-id.near"
+    },
+    "2.2.0": {
+      "sha256_hex": "c32f60ac6c53447c0dfe8eacde5460bd69427399e1f6f94bb38047ee1fbc82c2",
+      "code_hash_bs58": "E8vQKbimidACyArDcm7dXCnz564arQ2tD16gDaasFnho"
+    }
+  },
+  "test_wallets": {
+    "note": "stand-in creation wallets, sha256(\"rehearsal:<name>\")",
+    "a": "0xc75dce6c980f38e75ff9a6e877b57195a32e4259",
+    "c": "0x85623f10418aba371ada9168d3a96b30fb49fa3f",
+    "alice": "0xc677240e39c8fd24b315e9ed5354994f310c8bf4"
+  },
+  "links_before_upgrade": {
+    "e2b1b92b295e1914b1c7e478d4971ea41f225f8e75947a97d2af785f736ac108": "rehearsal_a",
+    "b8821eefc391d63f94856c1a01b7ad66b6f9fd9a840a9868f7fb7fe1f180b250": "rehearsal_b",
+    "r22-alice.bonuz-readme-check.testnet": "rehearsal_alice (registrar-checked)"
+  },
+  "status_after_migrate": {
+    "version": "2.2.0",
+    "owner": "bonuz-readme-check.testnet",
+    "pending_owner": null,
+    "registrar": "r22-registrar.bonuz-readme-check.testnet",
+    "network": "testnet",
+    "links": "3",
+    "legacy_links": "3",
+    "allow_registrar_checked": true,
+    "paused": false,
+    "available_balance": "2424355135424986600000000",
+    "reserve": "1000000000000000000000000",
+    "unlink_daily_cap": 100,
+    "raised_unlink_cap": null,
+    "unlinks_today": 0,
+    "stored_nonces": 3,
+    "stored_link_proposals": 0,
+    "max_link_proposals": 200,
+    "link_proposal_ttl_seconds": "604800"
+  },
+  "status_final": {
+    "version": "2.2.0",
+    "owner": "bonuz-readme-check.testnet",
+    "pending_owner": null,
+    "registrar": "r22-registrar.bonuz-readme-check.testnet",
+    "network": "testnet",
+    "links": "3",
+    "legacy_links": "1",
+    "allow_registrar_checked": true,
+    "paused": false,
+    "available_balance": "2529750331289259400000002",
+    "reserve": "1000000000000000000000000",
+    "unlink_daily_cap": 100,
+    "raised_unlink_cap": null,
+    "unlinks_today": 1,
+    "stored_nonces": 4,
+    "stored_link_proposals": 0,
+    "max_link_proposals": 200,
+    "link_proposal_ttl_seconds": "604800"
+  },
+  "transactions": {
+    "create_contract_account": "3kY3RCxe5eeGo4ZfJ1DpaugUyQdEbk4BMGE3kVUNLUTB",
+    "create_registrar_account": "9dGVzffXLXJRHL6wFze9WKUFf9TY9AcbW3hwX5SEX6Zh",
+    "create_alice_account": "7UdF4zFYuN1HH8npcese7k2qXLprmgGez1XHdwCh5fpM",
+    "deploy_2_1_0_and_init": "qujYE7iEvZ1y2d6sQRwqWocCqnNdS4jHFjM3zkKjj1T",
+    "add_registrar_fc_key_2_1_methods": "FHqgcar9gV4JtLwwRuzGQU4bMVxyJJ9kHMKYK5yj7mW9",
+    "v2_1_link_implicit_a": "BRzF4kr7HDrTiuAuSwJvJ5491mHqSrdA4AeMNNFaouZt",
+    "v2_1_link_implicit_b": "2pamVYdGRKMEy7uEXAKTd4z22p69MVFvvC2nezzJ5iiQ",
+    "v2_1_link_named_alice_registrar_checked": "GL5NLvpSbuVwvtx9FH8hfFwev2P1LveY6hfX9cz3Tys5",
+    "upgrade_2_2_0_deploy_and_migrate": "7aXXK3oJH7HRjJq1EmAHL76METC2gnF5n6ky2xSLcNuQ",
+    "add_registrar_fc_key_2_2_methods": "GNbpunAYbjtC7iY7jUrXzPP1r3sbDM8BQzqTvJi8RT97",
+    "adopt_legacy_link_implicit_a": "2iuhh2LeVfnAFqmqyutY8XndtfctKF7sriu4ih43H52L",
+    "set_handle_rename_a": "CkpWNatR7cAEDokxJwgysReEbZ354yVsyZZC1A1gKN1a",
+    "v2_2_link_implicit_c_with_wallet": "FT7mMU9uTCWHZMWXRDLLKzLZewJKqXbBnRfHymdzLxaG",
+    "unlink_by_registrar_legacy_alice": "HtQjrGxwWRoCaJbMtDo8wz7LP1zVyBzNfWAoW5MXFwYi",
+    "propose_link_alice": "C8fhPN2AW3yxkutq6qpSRaeHCVykrV32zwD8Vs196qnA",
+    "accept_link_by_alice": "8MG9vy6pgaUuV7zXURg5gE7geap4KF6PHqHubTcQxgE8",
+    "unlink_by_owner_alice": "CJFwVbZPfvncUfwYJWMwyZLxKQxKtCWVCg7drioVdXwn"
+  },
+  "refused_as_expected": {
+    "set_handle_on_legacy_handle_refused": {
+      "tx": "9iivbZhPnYqBzEgAUUYxgY4Ej84WmNuPtZRQae3HfmJV",
+      "error": "Smart contract panicked: a 2.1.0 link still names this bonuz ID; adopt_legacy_link or unlink it first"
+    },
+    "accept_by_wrong_signer_refused": {
+      "tx": "146VMJuzFBXbrYjQ7qffkfaCi6jNknaQ75sAaTYfQLJM",
+      "error": "Smart contract panicked: this NEAR account has no pending link proposal"
+    },
+    "accept_wrong_wallet_refused": {
+      "tx": "s3J7ACRAn4Rq3mgooNwKbhF9tTFyGxiwUJKYARb4YXf",
+      "error": "Smart contract panicked: the pending link proposal is for another bonuz ID"
+    },
+    "accept_without_yocto_refused": {
+      "tx": "6fEkqhGVdABPegEWcQums4ndpQ1ygUiQ9P3gqS6PgT8k",
+      "error": "Smart contract panicked: Requires attached deposit of exactly 1 yoctoNEAR"
+    }
+  },
+  "measured": {
+    "upgrade_2_2_0_deploy_and_migrate": "19.49 Tgas",
+    "v2_2_link_implicit_c_with_wallet": "4.05 Tgas",
+    "propose_link": "2.90 Tgas",
+    "accept_link": "2.98 Tgas"
+  },
+  "result": "all checks passed on chain. Two read-after-write checks first hit a lagging RPC node and were re-read the same evening: the 2.1.0 registry held 3 links before the upgrade (status_after_migrate shows links 3, legacy_links 3), and link_of(r22-alice) is null after unlink_by_owner (status_final shows 3 links: A adopted, B legacy, C new). The script now waits for FINAL and retries those reads."
+}

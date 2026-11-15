@@ -154,6 +154,19 @@ Measured on testnet: `link` burns about 2.7 Tgas (about 0.0003 NEAR) and stores 
 an implicit account (0.0049 NEAR, including the nonce record that `prune_nonces` frees after it
 expires); `unlink_by_registrar` burns about 2.1 Tgas.
 
+### Next: registry 2.2.0 (built and rehearsed on testnet, not on mainnet)
+
+2.2.0 keys every link to the bonuz user's creation wallet (`bonuz_eoa`, an EVM address that
+never changes) instead of the handle, which becomes a label (`set_handle`): a rename keeps the
+link, and a later holder of an old handle inherits nothing. Named accounts (`alice.near`) are
+linked without trusting bonuz: the registrar writes a pending claim (`propose_link`) and the
+link goes live only when the named account itself calls `accept_link` (1 yoctoNEAR). 2.1.0
+links survive the upgrade (deploy + `migrate()` in one transaction) and are moved to their
+wallet with `adopt_legacy_link`. Design, trade-offs, griefing limits and the prepared mainnet
+steps: [`docs/registry-2.2.0.md`](docs/registry-2.2.0.md). Testnet rehearsal hashes:
+[`deploy/testnet-2.2.0-rehearsal.json`](deploy/testnet-2.2.0-rehearsal.json). The mainnet
+registry stays on 2.1.0 until at least 26 Nov.
+
 ### `packages/near-link` (TypeScript)
 
 One implementation of the link message, used by the bonuz app (to build and sign), the bonuz backend

@@ -377,10 +377,14 @@ async fn upgrade_from_2_1_with_migrate_keeps_every_link() -> anyhow::Result<()> 
 
     let now = sandbox.view_block().await?.timestamp() / 1_000_000_000;
     let (a, b) = (Wallet::fresh(), Wallet::fresh());
-    for (w, handle) in [(&a, "mende"), (&b, "olls")] {
+    // b's call already carries bonuz_eoa, as an updated backend sends it: 2.1.0 must ignore it.
+    for args in [
+        a.link_args_v2_1("mende", contract.id().as_str(), now + 480),
+        b.link_args("olls", contract.id().as_str(), now + 480),
+    ] {
         registrar
             .call(contract.id(), "link")
-            .args_json(w.link_args_v2_1(handle, contract.id().as_str(), now + 480))
+            .args_json(args)
             .transact()
             .await?
             .into_result()?;
