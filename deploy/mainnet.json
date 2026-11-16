@@ -1,14 +1,18 @@
 {
   "network": "mainnet",
   "contract_account_id": "id.bonuz-id.near",
-  "contract_version": "2.1.0",
+  "contract_version": "2.2.0",
   "owner": "bonuz-id.near",
   "registrar": "registrar.bonuz-id.near",
   "backup_keys": "bonuz-id.near's full-access keys are also full-access keys of id.bonuz-id.near and registrar.bonuz-id.near",
   "registrar_key": {
     "kind": "function-call",
     "methods": [
+      "adopt_legacy_link",
+      "cancel_link_proposal",
       "link",
+      "propose_link",
+      "set_handle",
       "unlink_by_registrar"
     ],
     "allowance_near": "2"
@@ -17,9 +21,9 @@
   "allow_registrar_checked": false,
   "rpc": "https://rpc.mainnet.fastnear.com",
   "explorer": "https://nearblocks.io/address/id.bonuz-id.near",
-  "code_hash_bs58": "K3ML7nfmjrvKQZyKpYedPj4qrGGv7CxM1qNfz2sp3Zn",
-  "wasm_sha256_hex": "049f1cbf4bc919c18597206e319d00a3dd57a76bf54ded2ceb6de9ce09736a0d",
-  "built_from_commit": "bb6d7a8",
+  "code_hash_bs58": "7AjXwY8E63Hv5rKNsNLcPCiSy7MdrAaygkxNR7sZ8y8b",
+  "wasm_sha256_hex": "5ba4710aa4e84d5eac4b7a975cb6a7cfefa15d5c96ebe471b2c14311950fa470",
+  "built_from_commit": "642f30b",
   "build_command": "cargo near build non-reproducible-wasm",
   "toolchain": {
     "rustc": "1.95.0",
@@ -36,7 +40,8 @@
     "add_bonuz-id.near_key_to_id.bonuz-id.near": "9cnc2Qi7ESeu31LcaBUeQJp2S556M6uCLok1XPqdGsTg",
     "add_bonuz-id.near_key_to_registrar.bonuz-id.near": "9X6DPiJZYnyK1VKmM66tit6iLqUyygfgsWdWukfNq2zc",
     "deploy_and_init": "DUqs5iRUseBYv4yv28CWH9H1rz2La2NsxovirU256FDg",
-    "add_registrar_function_call_key": "AYymixJpRG3PRqZJYUxEGbBApTYxGr5kYuDuY9ecKb5G"
+    "add_registrar_function_call_key": "AkAvp2aqrDs12NjMYDJqyqPvPSyw4xi2kwbs1T3uDJZh",
+    "upgrade_code_and_migrate_2_1_to_2_2": "43VJCPMaoRHeTDwTiP7NmUg1C1LzVWYFPYYArDLA9xa8"
   },
   "demo_links": {},
   "measured": {}

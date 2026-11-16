@@ -1,7 +1,13 @@
 # Registry 2.2.0: links keyed to the creation wallet, named accounts confirmed on chain
 
-Status: built and rehearsed on testnet (15 Nov 2026). Mainnet `id.bonuz-id.near` stays on
-2.1.0 until Mende says yes, not before 26 Nov.
+Status: LIVE on mainnet since 16 Nov 2026 (Mende moved the date up). `id.bonuz-id.near`
+was upgraded from 2.1.0 with 0 links (nothing to backfill) in one transaction,
+`43VJCPMaoRHeTDwTiP7NmUg1C1LzVWYFPYYArDLA9xa8` (deploy + migrate); new registrar
+function-call key `AkAvp2aqrDs12NjMYDJqyqPvPSyw4xi2kwbs1T3uDJZh`. Before it: the
+mainnet-fork rehearsal passed 26 of 26 the same afternoon, and BonuzAdmin v2.0.217 (which
+picks the message form by `status().version`) was live in production. The new key is in
+Key Vault; the old 2.1.0 function-call key is deleted once a production link shows the
+new key in use (step 6).
 
 ## Two changes
 
@@ -281,9 +287,9 @@ funder is low. Note that the `r22` testnet registry stores `LinkV2.public_key` a
 string, while the fixed build stores it as optional, so `r22` must not be upgraded in place to
 the fixed build. It is a throwaway account.
 
-## Mainnet upgrade: prepared, NOT run
+## Mainnet upgrade: run 16 Nov 2026 (steps 1 to 6; see Status above)
 
-Not before 26 Nov 2026, and only after Mende says yes at the time.
+Originally planned for not before 26 Nov 2026; Mende moved it up.
 
 1. BonuzAdmin and the app first, both before the contract upgrade:
    - BonuzAdmin: a release that sends `bonuz_eoa` on every `link` call (2.1.0 ignores the
