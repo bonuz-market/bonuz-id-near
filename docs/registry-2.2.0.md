@@ -287,7 +287,7 @@ funder is low. Note that the `r22` testnet registry stores `LinkV2.public_key` a
 string, while the fixed build stores it as optional, so `r22` must not be upgraded in place to
 the fixed build. It is a throwaway account.
 
-## Mainnet upgrade: run 16 Nov 2026 (steps 1 to 6; see Status above)
+## Mainnet upgrade: run 16 Nov 2026 (steps 1 to 5 and the Key Vault half of step 6; see Status above)
 
 Originally planned for not before 26 Nov 2026; Mende moved it up.
 
