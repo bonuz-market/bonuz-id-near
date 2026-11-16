@@ -297,6 +297,12 @@ Not before 26 Nov 2026, and only after Mende says yes at the time.
    `cd contracts/registry && cargo test` and `node scripts/rehearse-deploy.ts` (sandbox, both
    pass), and check `contracts/registry/res/bonuz_id_registry.wasm` is the reviewed one
    (`shasum -a 256`; the PR records its hash).
+   Then `node scripts/rehearse-mainnet-fork.ts`: it reads `id.bonuz-id.near`'s live code, state
+   and keys (read only), loads them into a local sandbox and runs the exact step 4 command
+   against it, with throwaway keys and a preload that blocks every request not to 127.0.0.1.
+   Then the step 5 checks, the backfill count, a 2.2.0 link, refusals and the pause path. Run it
+   the same day as step 4, so it sees the state the upgrade will meet. First run, 16 Nov 2026:
+   26 of 26 pass, 0 links on mainnet (nothing to backfill), 3.52 NEAR free after the upgrade.
 3. Read only: `status()` on `id.bonuz-id.near` says `2.1.0`, and note `links`.
 4. `node scripts/deploy.ts --network mainnet --yes-mainnet --upgrade-code --new-registrar-key`
    (`--upgrade-code` without `--new-registrar-key` is refused before any network call)
