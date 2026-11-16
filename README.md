@@ -28,9 +28,11 @@ production writes to it (the app side is merged and ships with the next app rele
 curl -s https://rpc.mainnet.fastnear.com -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"query","params":{"request_type":"call_function","finality":"final","account_id":"id.bonuz-id.near","method_name":"status","args_base64":"e30="}}' | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(Buffer.from(JSON.parse(s).result.result).toString()))'
 ```
 
-You see `"version":"2.1.0"`, `"network":"mainnet"`, owner `bonuz-id.near`, registrar
+You see `"version":"2.2.0"`, `"network":"mainnet"`, owner `bonuz-id.near`, registrar
 `registrar.bonuz-id.near` and `"links"`, the number of NEAR accounts linked right now. Mainnet links
-implicit accounts only, so the contract itself checks every signature. The steps below use testnet,
+implicit accounts only, so the contract itself checks every signature. (It ran 2.1.0 from 14 Nov
+and was upgraded in place to 2.2.0 on 16 Nov 2026: same account, state migrated in the same
+transaction.) The steps below use testnet,
 where you can also run the whole flow yourself.
 
 ### 1. Read the live testnet registry (no install)
@@ -74,7 +76,7 @@ deposit, reads it back, and shows two refusals. You see, among others:
         | Expires: <unix seconds>
         | Wallet: 0x<40 hex>
 [5] The registrar submits link() with 0 deposit; the contract re-checks the signature
-    ok  gas burnt 2.64 Tgas; the contract paid 490 bytes of storage
+    ok  gas burnt 3.39 Tgas; the contract paid 758 bytes of storage
 [6] Read it back, like any app or agent can
     ok  bonuz_of(...) = "demo_user"
 [7] Refusals
@@ -85,8 +87,8 @@ deposit, reads it back, and shows two refusals. You see, among others:
 ### 3. Run the tests
 
 ```bash
-npm test                 # @bonuz/near-link: 35 tests, incl. 27 shared vectors and a cross-check with near-api-js
-npm run test:contract    # the contract: 36 unit tests, 3 sandbox tests, the same 27 vectors (needs Rust + cargo-near)
+npm test                 # @bonuz/near-link: 42 tests, incl. the 34 shared vectors and a cross-check with near-api-js
+npm run test:contract    # the contract: 62 unit tests, 6 sandbox tests (incl. the upgrade from the frozen 2.1.0 wasm), the same 34 vectors (needs Rust + cargo-near)
 ```
 
 Rust toolchain for the contract: `rustup` with Rust 1.95, `cargo install cargo-near --version 0.23.0`.
@@ -159,7 +161,7 @@ Measured on testnet: `link` burns about 2.7 Tgas (about 0.0003 NEAR) and stores 
 an implicit account (0.0049 NEAR, including the nonce record that `prune_nonces` frees after it
 expires); `unlink_by_registrar` burns about 2.1 Tgas.
 
-### Next: registry 2.2.0 (built and rehearsed on testnet, not on mainnet)
+### Registry 2.2.0 (live on mainnet since 16 Nov 2026)
 
 2.2.0 keys every link to the bonuz user's creation wallet (`bonuz_eoa`, an EVM address that
 never changes) instead of the handle, which becomes a label (`set_handle`): a rename keeps the
@@ -167,10 +169,15 @@ link, and a later holder of an old handle inherits nothing. Named accounts (`ali
 linked without trusting bonuz: the registrar writes a pending claim (`propose_link`) and the
 link goes live only when the named account itself calls `accept_link` (1 yoctoNEAR). 2.1.0
 links survive the upgrade (deploy + `migrate()` in one transaction) and are moved to their
-wallet with `adopt_legacy_link`. Design, trade-offs, griefing limits and the prepared mainnet
+wallet with `adopt_legacy_link`. Design, trade-offs, griefing limits and the mainnet
 steps: [`docs/registry-2.2.0.md`](docs/registry-2.2.0.md). Testnet rehearsal hashes:
-[`deploy/testnet-2.2.0-rehearsal.json`](deploy/testnet-2.2.0-rehearsal.json). The mainnet
-registry stays on 2.1.0 until at least 26 Nov.
+[`deploy/testnet-2.2.0-rehearsal.json`](deploy/testnet-2.2.0-rehearsal.json). Mainnet was
+upgraded on 16 Nov 2026 after a rehearsal against a local fork of mainnet
+(`scripts/rehearse-mainnet-fork.ts`, 26 of 26 checks) and with the bonuz backend already
+issuing the four-line message by `status().version`. Upgrade transaction:
+[`43VJCPMa...`](https://nearblocks.io/txns/43VJCPMaoRHeTDwTiP7NmUg1C1LzVWYFPYYArDLA9xa8).
+Named accounts on mainnet (propose and accept) are in the contract but not yet in the bonuz
+app or backend.
 
 ### `packages/near-link` (TypeScript)
 
@@ -213,11 +220,11 @@ byte.
 
 ## Deployments
 
-**Mainnet** (live since 14 Nov 2026)
+**Mainnet** (live since 14 Nov 2026, 2.2.0 since 16 Nov 2026)
 
 | | |
 |---|---|
-| Contract | `id.bonuz-id.near`, version 2.1.0 |
+| Contract | `id.bonuz-id.near`, version 2.2.0 |
 | Accepts | implicit accounts only (checked by the contract itself) |
 | Owner (pause, registrar, caps; cannot link) | `bonuz-id.near` |
 | Registrar (function-call key only) | `registrar.bonuz-id.near` |
