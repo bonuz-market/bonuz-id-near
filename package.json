@@ -16,7 +16,8 @@
     "test:contract": "cd contracts/registry && cargo test",
     "deploy:testnet": "node scripts/deploy.ts --network testnet",
     "deploy:mainnet": "node scripts/deploy.ts --network mainnet",
-    "rehearse:deploy": "node scripts/rehearse-deploy.ts"
+    "rehearse:deploy": "node scripts/rehearse-deploy.ts",
+    "rehearse:mainnet-fork": "node scripts/rehearse-mainnet-fork.ts"
   },
   "devDependencies": {
     "near-api-js": "7.4.0",
