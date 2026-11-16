@@ -8,3 +8,4 @@ neardev/
 .DS_Store
 node_modules/
 !contracts/registry/res/bonuz_id_registry.wasm
+!contracts/registry/res/bonuz_id_registry-2.1.0.wasm

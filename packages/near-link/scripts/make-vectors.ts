@@ -32,7 +32,7 @@ interface Case {
   why: string;
   input: LinkInput;
   context: { recipient: string; network: string; now_ns: string; allow_registrar_checked: boolean };
-  expect: { ok: true; checked_by: 'contract' | 'registrar' } | { ok: false; error: string };
+  expect: { ok: true; checked_by: 'contract' | 'registrar'; bonuz_eoa?: string } | { ok: false; error: string };
 }
 
 /** Signs `message` with `key` for `recipient`, then lets a case tamper with the call args. */
@@ -49,6 +49,7 @@ const make = (o: {
   recipient?: string;
   message?: string;
   nonceByte?: number;
+  wallet?: string;
   flipSignature?: boolean;
   allowNamed?: boolean;
   expect: Case['expect'];
@@ -58,7 +59,13 @@ const make = (o: {
   const handle = o.handle ?? 'mende';
   const message =
     o.message ??
-    buildLinkMessage({ accountId: account, bonuzId: handle, network: o.network ?? 'testnet', expires: o.expires ?? NOW + 480 });
+    buildLinkMessage({
+      accountId: account,
+      bonuzId: handle,
+      network: o.network ?? 'testnet',
+      expires: o.expires ?? NOW + 480,
+      ...(o.wallet === undefined ? {} : { bonuzEoa: o.wallet }),
+    });
   const n = nonce(o.nonceByte ?? 7);
   const sig = signNep413(key, { message, nonce: n, recipient: o.recipient ?? RECIPIENT });
   if (o.flipSignature) sig[0] ^= 1;
@@ -85,6 +92,8 @@ const make = (o: {
 
 const err = (error: string) => ({ ok: false as const, error });
 const upperA = accA.toUpperCase();
+const WALLET = `0x${'5a'.repeat(20)}`;
+const withWallet = `${buildLinkMessage({ accountId: accA, bonuzId: 'mende', network: 'testnet', expires: NOW + 480 })}\nWallet: `;
 
 const cases: Case[] = [
   make({ name: 'valid_implicit', why: 'app wallet, 8-minute expiry', expect: { ok: true, checked_by: 'contract' } }),
@@ -213,15 +222,58 @@ const cases: Case[] = [
   }),
   make({
     name: 'extra_line',
-    why: 'nothing after the three lines',
+    why: 'a fourth line must be the wallet',
     message: `${buildLinkMessage({ accountId: accA, bonuzId: 'mende', network: 'testnet', expires: NOW + 480 })}\nNote: hi`,
-    expect: err('message must have exactly three lines'),
+    expect: err("line 4 must read 'Wallet: 0x<40 lowercase hex>'"),
+  }),
+  make({
+    name: 'valid_implicit_with_wallet',
+    why: 'registry 2.2.0 message: line 4 names the creation wallet',
+    wallet: WALLET,
+    expect: { ok: true, checked_by: 'contract', bonuz_eoa: WALLET },
+  }),
+  make({
+    name: 'valid_named_with_wallet',
+    why: 'registry 2.2.0 message for a named account',
+    account: 'alice.testnet',
+    wallet: WALLET,
+    expect: { ok: true, checked_by: 'registrar', bonuz_eoa: WALLET },
+  }),
+  make({
+    name: 'wallet_checksum_case',
+    why: 'one spelling per wallet: lowercase hex only, no EIP-55 casing',
+    message: `${withWallet}0x${'5A'.repeat(20)}`,
+    expect: err("line 4 must read 'Wallet: 0x<40 lowercase hex>'"),
+  }),
+  make({
+    name: 'wallet_too_short',
+    why: '40 hex characters exactly',
+    message: `${withWallet}0x${'5a'.repeat(19)}`,
+    expect: err("line 4 must read 'Wallet: 0x<40 lowercase hex>'"),
+  }),
+  make({
+    name: 'wallet_without_space',
+    why: "exactly 'Wallet: '",
+    message: `${withWallet.replace('Wallet: ', 'Wallet:')}${WALLET}`,
+    expect: err("line 4 must read 'Wallet: 0x<40 lowercase hex>'"),
+  }),
+  make({
+    name: 'five_lines',
+    why: 'nothing after the wallet line',
+    message: `${withWallet}${WALLET}\nNote: hi`,
+    expect: err('message must have three lines, or four with the wallet'),
   }),
   make({
     name: 'trailing_newline',
-    why: 'no trailing newline',
+    why: 'no trailing newline (it reads as an empty fourth line)',
     message: `${buildLinkMessage({ accountId: accA, bonuzId: 'mende', network: 'testnet', expires: NOW + 480 })}\n`,
-    expect: err('message must have exactly three lines'),
+    expect: err("line 4 must read 'Wallet: 0x<40 lowercase hex>'"),
+  }),
+  make({
+    name: 'trailing_newline_after_wallet',
+    why: 'no trailing newline after the wallet either',
+    message: `${withWallet}${WALLET}\n`,
+    expect: err('message must have three lines, or four with the wallet'),
   }),
   make({
     name: 'crlf_line_endings',

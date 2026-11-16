@@ -3,7 +3,7 @@
  *
  * 1. starts a sandbox node and deploys the registry (contracts/registry/res/*.wasm)
  * 2. creates the bonuz registrar and gives it a FUNCTION-CALL key only
- *    (this contract, `link` + `unlink_by_registrar`, 2 NEAR gas allowance)
+ *    (this contract, the registrar methods only, 2 NEAR gas allowance)
  * 3. makes a brand-new ed25519 key: an app-style implicit account, never funded
  * 4. signs the link message with it (NEP-413, @bonuz/near-link), like the bonuz app does
  * 5. the registrar submits `link` with 0 deposit; the contract checks the signature itself
@@ -12,7 +12,7 @@
  *
  * Nothing here touches testnet or mainnet.
  */
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { Account, JsonRpcProvider, KeyPair, KeyPairSigner } from 'near-api-js';
 import { DEFAULT_ACCOUNT_ID, DEFAULT_PRIVATE_KEY, Sandbox } from 'near-sandbox';
@@ -35,6 +35,7 @@ if (!existsSync(WASM)) {
 const near = (n: number) => BigInt(n) * 10n ** 24n;
 const step = (n: number, text: string) => console.log(`\n[${n}] ${text}`);
 const ok = (text: string) => console.log(`    ok  ${text}`);
+const demoEoa = (handle: string) => `0x${createHash('sha256').update(handle).digest('hex').slice(0, 40)}`;
 const linkArgs = (i: LinkInput) => ({
   account_id: i.accountId,
   bonuz_id: i.bonuzId,
@@ -42,6 +43,8 @@ const linkArgs = (i: LinkInput) => ({
   nonce: i.nonce,
   signature: i.signature,
   message: i.message,
+  // Registry 2.2.0 keys a link to the user's creation wallet; the demo makes one per handle.
+  bonuz_eoa: demoEoa(i.bonuzId),
 });
 const failure = (e: unknown) => {
   const text = e instanceof Error ? e.message : JSON.stringify(e);
@@ -83,7 +86,7 @@ try {
   await registrarFull.addFunctionCallAccessKey({
     publicKey: fcKey.getPublicKey(),
     contractId: registry.accountId,
-    methodNames: ['link', 'unlink_by_registrar'],
+    methodNames: ['link', 'unlink_by_registrar', 'propose_link', 'cancel_link_proposal', 'set_handle', 'adopt_legacy_link'],
     allowance: near(2),
   });
   const registrar = new Account(registrarFull.accountId, provider, new KeyPairSigner(fcKey));
@@ -98,6 +101,7 @@ try {
     expires: nowS + 480,
     recipient: registry.accountId,
     nonce: randomBytes(32),
+    bonuzEoa: demoEoa('demo_user'),
   });
   const exists = await provider.viewAccount({ accountId: input.accountId }).then(
     () => true,
@@ -158,6 +162,7 @@ try {
     expires: nowS + 480,
     recipient: registry.accountId,
     nonce: randomBytes(32),
+    bonuzEoa: demoEoa('demo_user'),
   });
   try {
     await registrar.callFunction({ contractId: registry.accountId, methodName: 'link', args: linkArgs(other) });

@@ -469,7 +469,7 @@
     },
     {
       "name": "extra_line",
-      "why": "nothing after the three lines",
+      "why": "a fourth line must be the wallet",
       "input": {
         "accountId": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
         "bonuzId": "mende",
@@ -486,12 +486,146 @@
       },
       "expect": {
         "ok": false,
-        "error": "message must have exactly three lines"
+        "error": "line 4 must read 'Wallet: 0x<40 lowercase hex>'"
+      }
+    },
+    {
+      "name": "valid_implicit_with_wallet",
+      "why": "registry 2.2.0 message: line 4 names the creation wallet",
+      "input": {
+        "accountId": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "bonuzId": "mende",
+        "publicKey": "ed25519:AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+        "nonce": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+        "signature": "38yiNobm1XOeTXJsh4Nu+GzJHmjusQFPaUn7WKe9s30KdI5c7yMw/sM4I6zVSmCXvF1aI1OptuyHAy8EGcKhAA==",
+        "message": "Link NEAR account 8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c to bonuz ID @mende\nNetwork: testnet\nExpires: 1763000480\nWallet: 0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+      },
+      "context": {
+        "recipient": "id.bonuz.testnet",
+        "network": "testnet",
+        "now_ns": "1763000000000000000",
+        "allow_registrar_checked": true
+      },
+      "expect": {
+        "ok": true,
+        "checked_by": "contract",
+        "bonuz_eoa": "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+      }
+    },
+    {
+      "name": "valid_named_with_wallet",
+      "why": "registry 2.2.0 message for a named account",
+      "input": {
+        "accountId": "alice.testnet",
+        "bonuzId": "mende",
+        "publicKey": "ed25519:AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+        "nonce": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+        "signature": "EJBD/eAoW3rLkXT1Bx3CVM79v8BcmyskFCQqjvRX/TVf5UFr1t7N2v674mOsYLK+zCUejUjxC5jRf9J6vCD+CA==",
+        "message": "Link NEAR account alice.testnet to bonuz ID @mende\nNetwork: testnet\nExpires: 1763000480\nWallet: 0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+      },
+      "context": {
+        "recipient": "id.bonuz.testnet",
+        "network": "testnet",
+        "now_ns": "1763000000000000000",
+        "allow_registrar_checked": true
+      },
+      "expect": {
+        "ok": true,
+        "checked_by": "registrar",
+        "bonuz_eoa": "0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+      }
+    },
+    {
+      "name": "wallet_checksum_case",
+      "why": "one spelling per wallet: lowercase hex only, no EIP-55 casing",
+      "input": {
+        "accountId": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "bonuzId": "mende",
+        "publicKey": "ed25519:AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+        "nonce": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+        "signature": "bXUFKaj0td6Nzn2aVmG8SadXcgH/sdbqVqBaip7Ym0eubq/XgYJaIY+aTbqQtaZJGMrinwVG5+qd6YnXk3/ZAQ==",
+        "message": "Link NEAR account 8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c to bonuz ID @mende\nNetwork: testnet\nExpires: 1763000480\nWallet: 0x5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A5A"
+      },
+      "context": {
+        "recipient": "id.bonuz.testnet",
+        "network": "testnet",
+        "now_ns": "1763000000000000000",
+        "allow_registrar_checked": true
+      },
+      "expect": {
+        "ok": false,
+        "error": "line 4 must read 'Wallet: 0x<40 lowercase hex>'"
+      }
+    },
+    {
+      "name": "wallet_too_short",
+      "why": "40 hex characters exactly",
+      "input": {
+        "accountId": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "bonuzId": "mende",
+        "publicKey": "ed25519:AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+        "nonce": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+        "signature": "4ybKsUlR3Qe8tJchquVla3D7878/yl8PaOpNJAmOnP9jPFGblcYjzMFfkwjTvf80gVakrp0EYJgx/dElPRfTAQ==",
+        "message": "Link NEAR account 8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c to bonuz ID @mende\nNetwork: testnet\nExpires: 1763000480\nWallet: 0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+      },
+      "context": {
+        "recipient": "id.bonuz.testnet",
+        "network": "testnet",
+        "now_ns": "1763000000000000000",
+        "allow_registrar_checked": true
+      },
+      "expect": {
+        "ok": false,
+        "error": "line 4 must read 'Wallet: 0x<40 lowercase hex>'"
+      }
+    },
+    {
+      "name": "wallet_without_space",
+      "why": "exactly 'Wallet: '",
+      "input": {
+        "accountId": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "bonuzId": "mende",
+        "publicKey": "ed25519:AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+        "nonce": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+        "signature": "DMvJKpH+epNdd7//7kG9ba+n6iJg0jzexJv2Zn4slBulFggOksrO9XI2rgW7YsVi1PmfYc+WbLxtrXNPgv4aAQ==",
+        "message": "Link NEAR account 8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c to bonuz ID @mende\nNetwork: testnet\nExpires: 1763000480\nWallet:0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+      },
+      "context": {
+        "recipient": "id.bonuz.testnet",
+        "network": "testnet",
+        "now_ns": "1763000000000000000",
+        "allow_registrar_checked": true
+      },
+      "expect": {
+        "ok": false,
+        "error": "line 4 must read 'Wallet: 0x<40 lowercase hex>'"
+      }
+    },
+    {
+      "name": "five_lines",
+      "why": "nothing after the wallet line",
+      "input": {
+        "accountId": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "bonuzId": "mende",
+        "publicKey": "ed25519:AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+        "nonce": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+        "signature": "Ahw3RTyWNp9+EQp6CxMhmHbUFmreO3El6eVWYtmXOv6scEVjuDRQnhne9Yco6ueQ4Yro5rnIoDx1mtLqH1tRAQ==",
+        "message": "Link NEAR account 8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c to bonuz ID @mende\nNetwork: testnet\nExpires: 1763000480\nWallet: 0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\nNote: hi"
+      },
+      "context": {
+        "recipient": "id.bonuz.testnet",
+        "network": "testnet",
+        "now_ns": "1763000000000000000",
+        "allow_registrar_checked": true
+      },
+      "expect": {
+        "ok": false,
+        "error": "message must have three lines, or four with the wallet"
       }
     },
     {
       "name": "trailing_newline",
-      "why": "no trailing newline",
+      "why": "no trailing newline (it reads as an empty fourth line)",
       "input": {
         "accountId": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
         "bonuzId": "mende",
@@ -508,7 +642,29 @@
       },
       "expect": {
         "ok": false,
-        "error": "message must have exactly three lines"
+        "error": "line 4 must read 'Wallet: 0x<40 lowercase hex>'"
+      }
+    },
+    {
+      "name": "trailing_newline_after_wallet",
+      "why": "no trailing newline after the wallet either",
+      "input": {
+        "accountId": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+        "bonuzId": "mende",
+        "publicKey": "ed25519:AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+        "nonce": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+        "signature": "rp3C8VpmyJRKU9l+gtMgeihz4fx5E2vtH9BhwLlv9RwQED8c6X21ltaIxI/g4FEOY0TUymWIEW7/XYPIijOCBA==",
+        "message": "Link NEAR account 8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c to bonuz ID @mende\nNetwork: testnet\nExpires: 1763000480\nWallet: 0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a\n"
+      },
+      "context": {
+        "recipient": "id.bonuz.testnet",
+        "network": "testnet",
+        "now_ns": "1763000000000000000",
+        "allow_registrar_checked": true
+      },
+      "expect": {
+        "ok": false,
+        "error": "message must have three lines, or four with the wallet"
       }
     },
     {

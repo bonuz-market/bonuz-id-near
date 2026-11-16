@@ -29,7 +29,14 @@ for (const c of vectors.cases) {
       nowNs: BigInt(c.context.now_ns),
       allowRegistrarChecked: c.context.allow_registrar_checked,
     });
-    if (c.expect.ok) assert.deepEqual(got, { ok: true, checkedBy: c.expect.checked_by, expires: got.ok ? got.expires : -1 });
+    if (c.expect.ok) {
+      assert.deepEqual(got, {
+        ok: true,
+        checkedBy: c.expect.checked_by,
+        expires: got.ok ? got.expires : -1,
+        bonuzEoa: c.expect.bonuz_eoa ?? null,
+      });
+    }
     else assert.deepEqual(got, { ok: false, error: c.expect.error });
   });
 }
@@ -47,6 +54,9 @@ test('vectors cover the plan negative list', () => {
     'eth_implicit_account',
     'extra_line',
     'crlf_line_endings',
+    'valid_implicit_with_wallet',
+    'wallet_checksum_case',
+    'five_lines',
   ]) {
     assert.ok(names.has(n), n);
   }
@@ -75,6 +85,13 @@ test('parse round-trips the built message and nothing else', () => {
   assert.deepEqual(parseLinkMessage(m), { accountId: 'alice.testnet', bonuzId: 'mende', network: 'testnet', expires: 1 });
   assert.throws(() => parseLinkMessage(`${m} `));
   assert.throws(() => parseLinkMessage(m.replace('Network', 'network')));
+  const eoa = `0x${'ab'.repeat(20)}`;
+  const w = buildLinkMessage({ accountId: 'alice.testnet', bonuzId: 'mende', network: 'testnet', expires: 1, bonuzEoa: eoa });
+  assert.equal(w, `${m}\nWallet: ${eoa}`);
+  assert.deepEqual(parseLinkMessage(w), { accountId: 'alice.testnet', bonuzId: 'mende', network: 'testnet', expires: 1, bonuzEoa: eoa });
+  assert.equal(buildLinkMessage(parseLinkMessage(w)), w);
+  assert.throws(() => parseLinkMessage(w.replace('0xab', '0xAB')));
+  assert.throws(() => parseLinkMessage(`${w}\n`));
 });
 
 test('one expiry rule', () => {
@@ -101,7 +118,24 @@ test('signLink output passes checkLink', () => {
     nowNs: 1_763_000_000_000_000_000n,
     allowRegistrarChecked: false,
   });
-  assert.deepEqual(got, { ok: true, checkedBy: 'contract', expires: 1_763_000_480 });
+  assert.deepEqual(got, { ok: true, checkedBy: 'contract', expires: 1_763_000_480, bonuzEoa: null });
+  const eoa = `0x${'cd'.repeat(20)}`;
+  const withWallet = signLink(seed, {
+    bonuzId: 'mende',
+    network: 'testnet',
+    expires: 1_763_000_480,
+    recipient: 'id.bonuz.testnet',
+    nonce: new Uint8Array(32).fill(1),
+    bonuzEoa: eoa,
+  });
+  assert.ok(withWallet.message.endsWith(`\nWallet: ${eoa}`));
+  const got2 = checkLink(withWallet, {
+    recipient: 'id.bonuz.testnet',
+    network: 'testnet',
+    nowNs: 1_763_000_000_000_000_000n,
+    allowRegistrarChecked: false,
+  });
+  assert.deepEqual(got2, { ok: true, checkedBy: 'contract', expires: 1_763_000_480, bonuzEoa: eoa });
 });
 
 test('viewRegistry decodes the RPC byte array', async () => {

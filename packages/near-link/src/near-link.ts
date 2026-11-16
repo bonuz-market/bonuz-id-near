@@ -33,6 +33,7 @@ const LINE1_PREFIX = 'Link NEAR account ';
 const LINE1_MIDDLE = ' to bonuz ID @';
 const LINE2_PREFIX = 'Network: ';
 const LINE3_PREFIX = 'Expires: ';
+const LINE4_PREFIX = 'Wallet: ';
 // Rust's char::is_control (Unicode Cc) minus \n.
 const CONTROL = /[\u0000-\u0009\u000B-\u001F\u007F-\u009F]/;
 const utf8 = new TextEncoder();
@@ -46,23 +47,33 @@ export interface LinkMessage {
   bonuzId: string;
   network: string;
   expires: number;
+  /**
+   * Registry 2.2.0: the user's creation wallet, line 4 `Wallet: 0x...`, in canonical form
+   * (`0x` + 40 lowercase hex). Registry 2.2.0 refuses a link message without it; registry
+   * 2.1.0 refuses one with it. Pick by `status().version`.
+   */
+  bonuzEoa?: string;
 }
 
 /** The text the app shows in the biometric prompt and signs. Inputs must be canonical. */
-export const buildLinkMessage = ({ accountId, bonuzId, network, expires }: LinkMessage): string =>
-  `${LINE1_PREFIX}${accountId}${LINE1_MIDDLE}${bonuzId}\n${LINE2_PREFIX}${network}\n${LINE3_PREFIX}${expires}`;
+export const buildLinkMessage = ({ accountId, bonuzId, network, expires, bonuzEoa }: LinkMessage): string =>
+  `${LINE1_PREFIX}${accountId}${LINE1_MIDDLE}${bonuzId}\n${LINE2_PREFIX}${network}\n${LINE3_PREFIX}${expires}` +
+  (bonuzEoa === undefined ? '' : `\n${LINE4_PREFIX}${bonuzEoa}`);
 
 export class LinkError extends Error {}
 
 /**
- * Parses the exact three-line message. `\n` only; `\r`, other control
- * characters, a trailing newline, extra lines or extra text are refused.
+ * Parses the exact message: three lines (registry 2.1.0), or four with the wallet (2.2.0).
+ * `\n` only; `\r`, other control characters, a trailing newline, extra lines, extra text
+ * or a wallet not in canonical form are refused.
  */
 export const parseLinkMessage = (message: string): LinkMessage => {
   if (CONTROL.test(message)) throw new LinkError('message contains a control character');
   const lines = message.split('\n');
-  if (lines.length !== 3) throw new LinkError('message must have exactly three lines');
-  const [l1, l2, l3] = lines as [string, string, string];
+  if (lines.length !== 3 && lines.length !== 4) {
+    throw new LinkError('message must have three lines, or four with the wallet');
+  }
+  const [l1, l2, l3, l4] = lines as [string, string, string, string | undefined];
   if (!l1.startsWith(LINE1_PREFIX)) throw new LinkError("line 1 must start with 'Link NEAR account '");
   const rest = l1.slice(LINE1_PREFIX.length);
   const at = rest.indexOf(LINE1_MIDDLE);
@@ -78,7 +89,15 @@ export const parseLinkMessage = (message: string): LinkMessage => {
   if (!accountId || accountId.includes(' ') || !bonuzId || bonuzId.includes(' ')) {
     throw new LinkError('line 1 must name one account and one handle');
   }
-  return { accountId, bonuzId, network: l2.slice(LINE2_PREFIX.length), expires: Number(expiresText) };
+  const msg: LinkMessage = { accountId, bonuzId, network: l2.slice(LINE2_PREFIX.length), expires: Number(expiresText) };
+  if (l4 !== undefined) {
+    const bonuzEoa = l4.slice(LINE4_PREFIX.length);
+    if (!l4.startsWith(LINE4_PREFIX) || !isBonuzEoa(bonuzEoa)) {
+      throw new LinkError("line 4 must read 'Wallet: 0x<40 lowercase hex>'");
+    }
+    msg.bonuzEoa = bonuzEoa;
+  }
+  return msg;
 };
 
 /** Refusal text for a handle, or null. Canonical form: 1 to 64 of `a-z 0-9 _ . -`. */
@@ -188,7 +207,8 @@ export interface LinkContext {
 }
 
 export type LinkCheck =
-  | { ok: true; checkedBy: 'contract' | 'registrar'; expires: number }
+  /** `bonuzEoa`: the wallet the message names (line 4), null for a three-line 2.1.0 message. */
+  | { ok: true; checkedBy: 'contract' | 'registrar'; expires: number; bonuzEoa: string | null }
   | { ok: false; error: string };
 
 const decodeB64 = (text: string, what: string): Uint8Array => {
@@ -241,24 +261,33 @@ export const checkLink = (input: LinkInput, ctx: LinkContext): LinkCheck => {
       if (implicitAccountId(publicKey) !== input.accountId) {
         return { ok: false, error: 'the key does not belong to this implicit account' };
       }
-      return { ok: true, checkedBy: 'contract', expires: msg.expires };
+      return { ok: true, checkedBy: 'contract', expires: msg.expires, bonuzEoa: msg.bonuzEoa ?? null };
     }
     if (!ctx.allowRegistrarChecked) return { ok: false, error: 'this registry only links implicit accounts' };
-    return { ok: true, checkedBy: 'registrar', expires: msg.expires };
+    return { ok: true, checkedBy: 'registrar', expires: msg.expires, bonuzEoa: msg.bonuzEoa ?? null };
   } catch (e) {
     if (e instanceof LinkError) return { ok: false, error: e.message };
     throw e;
   }
 };
 
-/** Builds and signs a link the way the bonuz app does. Tests and the demo use it. */
+/**
+ * Builds and signs a link the way the bonuz app does. Tests and the demo use it. Pass
+ * `bonuzEoa` for registry 2.2.0 (four-line message), leave it out for 2.1.0.
+ */
 export const signLink = (
   secretSeed: Uint8Array,
-  args: { bonuzId: string; network: Network; expires: number; recipient: string; nonce: Uint8Array },
+  args: { bonuzId: string; network: Network; expires: number; recipient: string; nonce: Uint8Array; bonuzEoa?: string },
 ): LinkInput => {
   const publicKey = nacl.sign.keyPair.fromSeed(secretSeed).publicKey;
   const accountId = implicitAccountId(publicKey);
-  const message = buildLinkMessage({ accountId, bonuzId: args.bonuzId, network: args.network, expires: args.expires });
+  const message = buildLinkMessage({
+    accountId,
+    bonuzId: args.bonuzId,
+    network: args.network,
+    expires: args.expires,
+    ...(args.bonuzEoa === undefined ? {} : { bonuzEoa: args.bonuzEoa }),
+  });
   const signature = signNep413(secretSeed, { message, nonce: args.nonce, recipient: args.recipient });
   return {
     accountId,
@@ -273,12 +302,31 @@ export const signLink = (
 // ---- tiny read-only registry client (JSON-RPC, no SDK) ----
 
 export interface RegistryLink {
+  /** The current handle label (registry 2.2.0: `""` when the user's wallet has none). */
   bonuz_id: string;
-  public_key: string;
-  checked_by: 'contract' | 'registrar';
+  /** Registry 2.2.0: the user's creation wallet; null for a link made by 2.1.0 and not yet adopted. */
+  bonuz_eoa?: string | null;
+  /** Registry 2.2.0: null only for a link a named account accepted through a contract call. */
+  public_key: string | null;
+  /** `account`: a named account confirmed the link itself with accept_link (registry 2.2.0). */
+  checked_by: 'contract' | 'registrar' | 'account';
   linked_at_block: string;
   linked_at: string;
 }
+
+/** Registry 2.2.0: a pending claim that the named account can accept. */
+export interface RegistryLinkProposal {
+  account_id: string;
+  bonuz_eoa: string;
+  bonuz_id: string | null;
+  /** Block time in nanoseconds. */
+  proposed_at: string;
+  /** Unix seconds. */
+  expires: string;
+}
+
+/** A bonuz creation wallet as the registry stores it: 0x and 40 lowercase hex characters. */
+export const isBonuzEoa = (value: string): boolean => /^0x[0-9a-f]{40}$/.test(value);
 
 export interface RegistryOpts {
   contractId: string;
@@ -289,7 +337,16 @@ export interface RegistryOpts {
 }
 
 export const viewRegistry = async <T>(
-  method: 'bonuz_of' | 'account_of' | 'link_of' | 'status',
+  method:
+    | 'bonuz_of'
+    | 'account_of'
+    | 'link_of'
+    | 'status'
+    | 'account_of_eoa'
+    | 'eoa_of'
+    | 'handle_of'
+    | 'link_proposal_of'
+    | 'link_proposal_for',
   args: Record<string, string>,
   opts: RegistryOpts,
 ): Promise<T> => {
@@ -321,3 +378,11 @@ export const accountOf = (bonuzId: string, opts: RegistryOpts) =>
   viewRegistry<string | null>('account_of', { bonuz_id: bonuzId }, opts);
 export const linkOf = (accountId: string, opts: RegistryOpts) =>
   viewRegistry<RegistryLink | null>('link_of', { account_id: accountId }, opts);
+/** Registry 2.2.0: the NEAR account linked to a creation wallet. */
+export const accountOfEoa = (bonuzEoa: string, opts: RegistryOpts) =>
+  viewRegistry<string | null>('account_of_eoa', { bonuz_eoa: bonuzEoa }, opts);
+/** Registry 2.2.0: the creation wallet a handle labels right now. */
+export const eoaOf = (bonuzId: string, opts: RegistryOpts) => viewRegistry<string | null>('eoa_of', { bonuz_id: bonuzId }, opts);
+/** Registry 2.2.0: the pending claim on a NEAR account (null once expired). */
+export const linkProposalOf = (accountId: string, opts: RegistryOpts) =>
+  viewRegistry<RegistryLinkProposal | null>('link_proposal_of', { account_id: accountId }, opts);

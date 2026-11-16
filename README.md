@@ -72,6 +72,7 @@ deposit, reads it back, and shows two refusals. You see, among others:
         | Link NEAR account <64 hex> to bonuz ID @demo_user
         | Network: testnet
         | Expires: <unix seconds>
+        | Wallet: 0x<40 hex>
 [5] The registrar submits link() with 0 deposit; the contract re-checks the signature
     ok  gas burnt 2.64 Tgas; the contract paid 490 bytes of storage
 [6] Read it back, like any app or agent can
@@ -122,6 +123,10 @@ Expires: <unix seconds>
 
 NEP-413 `recipient` is the registry contract id and the `nonce` is the backend's 32-byte challenge.
 
+From registry 2.2.0 the message has a fourth line, `Wallet: <0x + 40 lowercase hex>`, the
+user's creation wallet, and the three-line form above is refused; 2.1.0 refuses the four-line
+form. See [`docs/registry-2.2.0.md`](docs/registry-2.2.0.md).
+
 ### The contract (`contracts/registry`, Rust, near-sdk 5.30.1)
 
 | Method | Who | What |
@@ -153,6 +158,19 @@ mainnet registry starts with implicit accounts only.
 Measured on testnet: `link` burns about 2.7 Tgas (about 0.0003 NEAR) and stores about 490 bytes for
 an implicit account (0.0049 NEAR, including the nonce record that `prune_nonces` frees after it
 expires); `unlink_by_registrar` burns about 2.1 Tgas.
+
+### Next: registry 2.2.0 (built and rehearsed on testnet, not on mainnet)
+
+2.2.0 keys every link to the bonuz user's creation wallet (`bonuz_eoa`, an EVM address that
+never changes) instead of the handle, which becomes a label (`set_handle`): a rename keeps the
+link, and a later holder of an old handle inherits nothing. Named accounts (`alice.near`) are
+linked without trusting bonuz: the registrar writes a pending claim (`propose_link`) and the
+link goes live only when the named account itself calls `accept_link` (1 yoctoNEAR). 2.1.0
+links survive the upgrade (deploy + `migrate()` in one transaction) and are moved to their
+wallet with `adopt_legacy_link`. Design, trade-offs, griefing limits and the prepared mainnet
+steps: [`docs/registry-2.2.0.md`](docs/registry-2.2.0.md). Testnet rehearsal hashes:
+[`deploy/testnet-2.2.0-rehearsal.json`](deploy/testnet-2.2.0-rehearsal.json). The mainnet
+registry stays on 2.1.0 until at least 26 Nov.
 
 ### `packages/near-link` (TypeScript)
 
