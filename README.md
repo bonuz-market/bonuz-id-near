@@ -14,6 +14,30 @@ handle backed by a real person's profile.
 Built for the NEAR HACKATHON (November 2026). All code in this repo was written with Claude
 (Anthropic's AI), directed by the bonuz team.
 
+## Where it stands (18 Nov 2026)
+
+The tag [`hackathon-submission`](https://github.com/bonuz-market/bonuz-id-near/tree/hackathon-submission)
+is the code as it was submitted on 14 Nov. What changed after that, so the README matches what runs today:
+
+- **A real person is linked on NEAR mainnet.** The bonuz founder's own app wallet is linked to the
+  handle `mende` (signature checked by the contract, `checked_by: "contract"`). Ask NEAR yourself
+  in step 0 below.
+- **The registry runs 2.2.0 on mainnet** since 16 Nov: links are keyed to the user's creation wallet,
+  so renaming a handle keeps the link. Same account, state migrated in one transaction.
+- **The app flow is finished** in bonuz app 4.5.0, the next store release: verify by signing one
+  message, the verified mark on the NEAR row, a NEAR token screen, and connecting the wallet to NEAR apps
+  such as near.com. (The App Store still serves 4.4.0 until 4.5.0 is released.)
+- **A real NEAR wallet, used for real.** That same app wallet holds NEAR, has sent NEAR to another
+  NEAR account from the app, and got its own name, `mendematthias.near`, from inside bonuz: the app
+  created the named account on mainnet with the wallet's own key. The app shows the name on the
+  wallet card only after it checks the name's key is the wallet's key. On chain:
+  [`mendematthias.near`](https://nearblocks.io/address/mendematthias.near) has one full-access key,
+  `ed25519:5DQMjYk...ooX2`, the same key as the linked wallet in `link_of` below.
+- **Stage 2 is working:** naming the account (above), and sending crypto to a bonuz handle
+  (`@mende`): the app resolves the handle through this registry (`account_of`), re-checks it just
+  before signing, and pays that user's verified NEAR account. The bonuz MCP server returns the same
+  account for a handle, so AI agents can pay a person by handle too.
+
 ## Try it
 
 You need Node.js 22.18 or newer. Nothing else: the contract wasm is committed.
@@ -22,7 +46,7 @@ You need Node.js 22.18 or newer. Nothing else: the contract wasm is committed.
 
 The production registry runs on NEAR mainnet at
 [`id.bonuz-id.near`](https://nearblocks.io/address/id.bonuz-id.near), and the bonuz backend in
-production writes to it (the app side is merged and ships with the next app release). Ask it for its status:
+production writes to it (the app flow ships in bonuz app 4.5.0). Ask it for its status:
 
 ```bash
 curl -s https://rpc.mainnet.fastnear.com -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"query","params":{"request_type":"call_function","finality":"final","account_id":"id.bonuz-id.near","method_name":"status","args_base64":"e30="}}' | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(Buffer.from(JSON.parse(s).result.result).toString()))'
@@ -32,7 +56,17 @@ You see `"version":"2.2.0"`, `"network":"mainnet"`, owner `bonuz-id.near`, regis
 `registrar.bonuz-id.near` and `"links"`, the number of NEAR accounts linked right now. Mainnet links
 implicit accounts only, so the contract itself checks every signature. (It ran 2.1.0 from 14 Nov
 and was upgraded in place to 2.2.0 on 16 Nov 2026: same account, state migrated in the same
-transaction.) The steps below use testnet,
+transaction.)
+
+Then ask it who a real bonuz user's NEAR account is. `args_base64` is `{"bonuz_id":"mende"}`:
+
+```bash
+curl -s https://rpc.mainnet.fastnear.com -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"query","params":{"request_type":"call_function","finality":"final","account_id":"id.bonuz-id.near","method_name":"account_of","args_base64":"eyJib251el9pZCI6Im1lbmRlIn0="}}' | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(Buffer.from(JSON.parse(s).result.result).toString()))'
+```
+
+You see `"3e9c20b73dba685ad26064b1cbb664be9a30bf8c970e50f3214857d5f69eabb5"`, the NEAR wallet
+the bonuz app made for that user, linked after the wallet signed the link message. `link_of` on that
+account returns `"bonuz_id":"mende"` and `"checked_by":"contract"`. The steps below use testnet,
 where you can also run the whole flow yourself.
 
 ### 1. Read the live testnet registry (no install)
@@ -287,9 +321,14 @@ bonuz team.
 
 ## Roadmap
 
-- **Stage 2:** NEAR for every bonuz user in the wallet, and sign in with a NEAR account.
-- **Stage 3:** AI agents, which already get bonuz IDs today, get a NEAR account too, so an agent has
-  an identity and a wallet in one place.
+- **Stage 1 (this entry, live):** a verified NEAR account on the bonuz ID, recorded on NEAR mainnet.
+- **Stage 2 (working in the app):** users name their NEAR account in bonuz (`alice.near` instead of
+  64 hex characters), and sending crypto to a bonuz handle lands in that user's verified NEAR
+  account. Next: the name goes into this registry too, through the 2.2.0 contract's
+  `propose_link` / `accept_link` (the named account confirms on chain), so it shows on the public
+  bonuz ID. Today the registry links the wallet, and the name is checked by the app.
+- **Stage 3:** AI agents, which already get bonuz IDs today, get a verified NEAR account of their
+  own, so any app can check who an agent is before it trusts or pays it.
 
 ## License
 
