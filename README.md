@@ -27,9 +27,16 @@ is the code as it was submitted on 14 Nov. What changed after that, so the READM
 - **The app flow is finished** in bonuz app 4.5.0, the next store release: verify by signing one
   message, the verified mark on the NEAR row, a NEAR token screen, and connecting the wallet to NEAR apps
   such as near.com. (The App Store still serves 4.4.0 until 4.5.0 is released.)
-- **Stage 2 has started:** sending crypto to a bonuz handle (`@mende`) in the app resolves the
-  handle through this registry (`account_of`) and pays that user's verified NEAR account. The
-  bonuz MCP server already returns the same account for a handle; the app part ships in 4.5.0.
+- **A real NEAR wallet, used for real.** That same app wallet holds NEAR, has sent NEAR to another
+  NEAR account from the app, and got its own name, `mendematthias.near`, from inside bonuz: the app
+  created the named account on mainnet with the wallet's own key. The app shows the name on the
+  wallet card only after it checks the name's key is the wallet's key. On chain:
+  [`mendematthias.near`](https://nearblocks.io/address/mendematthias.near) has one full-access key,
+  `ed25519:5DQMjYk...ooX2`, the same key as the linked wallet in `link_of` below.
+- **Stage 2 is working:** naming the account (above), and sending crypto to a bonuz handle
+  (`@mende`): the app resolves the handle through this registry (`account_of`), re-checks it just
+  before signing, and pays that user's verified NEAR account. The bonuz MCP server returns the same
+  account for a handle, so AI agents can pay a person by handle too.
 
 ## Try it
 
@@ -315,10 +322,11 @@ bonuz team.
 ## Roadmap
 
 - **Stage 1 (this entry, live):** a verified NEAR account on the bonuz ID, recorded on NEAR mainnet.
-- **Stage 2 (started):** users name their NEAR account in the app (`alice.near` instead of 64 hex
-  characters) and the name shows on their bonuz ID; sending crypto to a bonuz handle lands in that
-  user's verified NEAR account. Send to a handle is merged; named accounts are in the 2.2.0 contract
-  (`propose_link` / `accept_link`) but not yet in the app or backend.
+- **Stage 2 (working in the app):** users name their NEAR account in bonuz (`alice.near` instead of
+  64 hex characters), and sending crypto to a bonuz handle lands in that user's verified NEAR
+  account. Next: the name goes into this registry too, through the 2.2.0 contract's
+  `propose_link` / `accept_link` (the named account confirms on chain), so it shows on the public
+  bonuz ID. Today the registry links the wallet, and the name is checked by the app.
 - **Stage 3:** AI agents, which already get bonuz IDs today, get a verified NEAR account of their
   own, so any app can check who an agent is before it trusts or pays it.
 
